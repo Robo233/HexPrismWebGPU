@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    {
+      "name": "dawn",
+      "features": ["d3d12"]
+    },
+    "sdl3",
+    "glm"
+  ]
+}
