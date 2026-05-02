@@ -5,6 +5,20 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+static glm::vec3 rotateAroundAxis(
+    glm::vec3 vector,
+    glm::vec3 axis,
+    float degrees
+) {
+    float angle = glm::radians(degrees);
+    float c = std::cos(angle);
+    float s = std::sin(angle);
+
+    return vector * c +
+        glm::cross(axis, vector) * s +
+        axis * glm::dot(axis, vector) * (1.0f - c);
+}
+
 glm::vec3 getCameraForward(const Camera& camera) {
     float yawRad = glm::radians(camera.yaw);
     float pitchRad = glm::radians(camera.pitch);
@@ -17,11 +31,34 @@ glm::vec3 getCameraForward(const Camera& camera) {
     return glm::normalize(forward);
 }
 
-glm::vec3 getCameraRight(const Camera& camera) {
+static glm::vec3 getUnrolledCameraRight(const Camera& camera) {
     glm::vec3 forward = getCameraForward(camera);
     glm::vec3 worldUp = glm::vec3(0.0f, 1.0f, 0.0f);
 
     return glm::normalize(glm::cross(forward, worldUp));
+}
+
+static glm::vec3 getUnrolledCameraUp(const Camera& camera) {
+    glm::vec3 forward = getCameraForward(camera);
+    glm::vec3 right = getUnrolledCameraRight(camera);
+
+    return glm::normalize(glm::cross(right, forward));
+}
+
+glm::vec3 getCameraRight(const Camera& camera) {
+    glm::vec3 forward = getCameraForward(camera);
+    glm::vec3 up = getCameraUp(camera);
+
+    return glm::normalize(glm::cross(forward, up));
+}
+
+glm::vec3 getCameraUp(const Camera& camera) {
+    glm::vec3 forward = getCameraForward(camera);
+    glm::vec3 up = getUnrolledCameraUp(camera);
+
+    return glm::normalize(
+        rotateAroundAxis(up, forward, camera.roll)
+    );
 }
 
 void rotateCamera(

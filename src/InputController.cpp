@@ -2,6 +2,12 @@
 
 #include <glm/glm.hpp>
 
+static bool isCameraUpsideDown(const Camera& camera) {
+    constexpr glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+
+    return glm::dot(getCameraUp(camera), worldUp) < 0.0f;
+}
+
 void InputController::update(
     SDL_Window* window,
     Camera& camera,
@@ -49,9 +55,12 @@ void InputController::handleEvent(
 
     if (event.type == SDL_EVENT_MOUSE_MOTION && rightMouseDown_) {
         constexpr float mouseSensitivity = 0.12f;
+        float rollSign = isCameraUpsideDown(camera) ? -1.0f : 1.0f;
 
-        float yawDelta = event.motion.xrel * mouseSensitivity;
-        float pitchDelta = -event.motion.yrel * mouseSensitivity;
+        float yawDelta =
+            event.motion.xrel * mouseSensitivity * rollSign;
+        float pitchDelta =
+            -event.motion.yrel * mouseSensitivity * rollSign;
 
         rotateCamera(camera, yawDelta, pitchDelta);
     }
@@ -74,6 +83,8 @@ void InputController::handleKeyboard(
     glm::vec3 forward = getCameraForward(camera);
     glm::vec3 right = getCameraRight(camera);
     glm::vec3 worldUp = glm::vec3(0.0f, 1.0f, 0.0f);
+    float rollSign = isCameraUpsideDown(camera) ? -1.0f : 1.0f;
+    glm::vec3 vertical = worldUp * rollSign;
 
     float moveAmount = moveSpeed * deltaTime;
     float rotateAmount = rotateSpeed * deltaTime;
@@ -101,26 +112,26 @@ void InputController::handleKeyboard(
     // Swapped as requested:
     // Ctrl moves up, Space moves down.
     if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL]) {
-        camera.position += worldUp * moveAmount;
+        camera.position += vertical * moveAmount;
     }
 
     if (keys[SDL_SCANCODE_SPACE]) {
-        camera.position -= worldUp * moveAmount;
+        camera.position -= vertical * moveAmount;
     }
 
     if (keys[SDL_SCANCODE_LEFT]) {
-        rotateCamera(camera, -rotateAmount, 0.0f);
+        rotateCamera(camera, -rotateAmount * rollSign, 0.0f);
     }
 
     if (keys[SDL_SCANCODE_RIGHT]) {
-        rotateCamera(camera, rotateAmount, 0.0f);
+        rotateCamera(camera, rotateAmount * rollSign, 0.0f);
     }
 
     if (keys[SDL_SCANCODE_UP]) {
-        rotateCamera(camera, 0.0f, rotateAmount);
+        rotateCamera(camera, 0.0f, rotateAmount * rollSign);
     }
 
     if (keys[SDL_SCANCODE_DOWN]) {
-        rotateCamera(camera, 0.0f, -rotateAmount);
+        rotateCamera(camera, 0.0f, -rotateAmount * rollSign);
     }
 }

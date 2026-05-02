@@ -574,7 +574,7 @@ void WebGpuRenderer::render(
         glm::lookAt(
             camera.position,
             camera.position + forward,
-            glm::vec3(0.0f, 1.0f, 0.0f)
+            getCameraUp(camera)
         );
 
     glm::mat4 proj =
