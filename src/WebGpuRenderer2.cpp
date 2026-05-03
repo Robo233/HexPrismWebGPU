@@ -16,7 +16,80 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
+
+namespace {
+
+constexpr float Pi = 3.14159265359f;
+constexpr float TwoPi = Pi * 2.0f;
+
+float positiveFraction(float value) {
+    return value - std::floor(value);
+}
+
+float dayCyclePhaseForTime(float timeSeconds) {
+    return positiveFraction(
+        Settings::Time::dayNightStartPhase +
+            timeSeconds / Settings::Time::dayNightCycleSeconds
+    );
+}
+
+glm::vec3 sunDirectionForPhase(float phase) {
+    float angle = phase * TwoPi;
+
+    return glm::normalize(
+        glm::vec3(
+            std::cos(angle) * 0.78f,
+            std::sin(angle),
+            -0.54f
+        )
+    );
+}
+
+float daylightAmountForSunDirection(glm::vec3 sunDir) {
+    float t = std::clamp((sunDir.y + 0.06f) / 0.28f, 0.0f, 1.0f);
+
+    return t * t * (3.0f - 2.0f * t);
+}
+
+uint64_t shadowLightStepForTime(float timeSeconds) {
+    return static_cast<uint64_t>(
+        std::floor(timeSeconds / Settings::Shadow::lightUpdateSeconds)
+    );
+}
+
+std::string wgslFloat(float value) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(6) << value;
+
+    return stream.str();
+}
+
+std::string wgslColor(Settings::Color3 color) {
+    return
+        "vec3f(" +
+        wgslFloat(color.r) + ", " +
+        wgslFloat(color.g) + ", " +
+        wgslFloat(color.b) + ")";
+}
+
+void replaceAll(
+    std::string& text,
+    const std::string& token,
+    const std::string& replacement
+) {
+    std::size_t position = 0;
+
+    while ((position = text.find(token, position)) != std::string::npos) {
+        text.replace(position, token.length(), replacement);
+        position += replacement.length();
+    }
+}
+
+} // namespace
 
 static std::ostream& operator<<(std::ostream& os, wgpu::StringView view) {
     if (view.data == nullptr) {
@@ -319,7 +392,7 @@ bool WebGpuRenderer::createPrismBuffers() {
 }
 
 wgpu::ShaderModule WebGpuRenderer::createShaderModule() {
-    const char* wgsl = R"(
+    std::string wgsl = R"(
 struct FrameUniforms {
     viewProjection : mat4x4f,
     lightViewProjection : mat4x4f,
@@ -377,8 +450,79 @@ fn saturate(value : f32) -> f32 {
     return clamp(value, 0.0, 1.0);
 }
 
+const pi : f32 = 3.14159265359;
+const twoPi : f32 = 6.28318530718;
+const dayNightCycleSeconds : f32 = {{DAY_NIGHT_CYCLE_SECONDS}};
+const dayNightStartPhase : f32 = {{DAY_NIGHT_START_PHASE}};
+
+fn dayCyclePhase() -> f32 {
+    return fract(
+        dayNightStartPhase +
+        frame.cameraForwardAndTime.w / dayNightCycleSeconds
+    );
+}
+
+fn sunDirectionForPhase(phase : f32) -> vec3f {
+    let angle = phase * twoPi;
+
+    return normalize(vec3f(
+        cos(angle) * 0.78,
+        sin(angle),
+        -0.54
+    ));
+}
+
 fn sunDirection() -> vec3f {
-    return normalize(vec3f(0.52, 0.66, -0.54));
+    return sunDirectionForPhase(dayCyclePhase());
+}
+
+fn moonDirection(sunDir : vec3f) -> vec3f {
+    return normalize(-sunDir);
+}
+
+fn daylightAmount(sunDir : vec3f) -> f32 {
+    return smoothstep(-0.06, 0.22, sunDir.y);
+}
+
+fn twilightAmount(sunDir : vec3f) -> f32 {
+    let nearHorizon = 1.0 - smoothstep(0.04, 0.42, abs(sunDir.y));
+
+    return nearHorizon * smoothstep(-0.28, 0.10, sunDir.y);
+}
+
+fn sunLightColor(sunDir : vec3f) -> vec3f {
+    let highSun = smoothstep(0.18, 0.86, sunDir.y);
+
+    return mix(sunriseSunColor(), {{HIGH_SUN_COLOR}}, highSun) *
+        daylightAmount(sunDir);
+}
+
+fn moonlightAmount(moonDir : vec3f, day : f32) -> f32 {
+    return smoothstep(0.02, 0.36, moonDir.y) * (1.0 - day);
+}
+
+fn moonLightColor(moonDir : vec3f, day : f32) -> vec3f {
+    return {{MOON_LIGHT_COLOR}} * moonlightAmount(moonDir, day);
+}
+
+fn sunriseSunColor() -> vec3f {
+    return {{SUNRISE_SUN_COLOR}};
+}
+
+fn sunriseSkyAmbientColor() -> vec3f {
+    return {{SUNRISE_SKY_AMBIENT_COLOR}};
+}
+
+fn daySkyAmbientColor() -> vec3f {
+    return {{DAY_SKY_AMBIENT_COLOR}};
+}
+
+fn nightSkyAmbientColor() -> vec3f {
+    return {{NIGHT_SKY_AMBIENT_COLOR}};
+}
+
+fn sunriseHorizonColor() -> vec3f {
+    return {{SUNRISE_HORIZON_COLOR}};
 }
 
 fn hash2(p : vec2f) -> f32 {
@@ -413,6 +557,67 @@ fn fbm(p : vec2f) -> f32 {
 
     return total / normalization;
 }
+)";
+
+    wgsl += R"(
+
+fn rotate2D(p : vec2f, angle : f32) -> vec2f {
+    let c = cos(angle);
+    let s = sin(angle);
+
+    return vec2f(
+        p.x * c - p.y * s,
+        p.x * s + p.y * c
+    );
+}
+
+fn starLayer(uv : vec2f, scale : f32, seed : f32) -> f32 {
+    let p = uv * scale + vec2f(seed, seed * 1.37);
+    let baseCell = floor(p);
+    var result = 0.0;
+
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let cell = baseCell + vec2f(f32(x), f32(y));
+            let randomPoint = vec2f(
+                hash2(cell + vec2f(seed + 19.17, 3.11)),
+                hash2(cell + vec2f(5.73, seed + 41.29))
+            );
+            let densityRoll = hash2(cell + vec2f(seed + 97.23, seed - 61.71));
+            let starPresence = smoothstep({{STAR_DENSITY_THRESHOLD}}, 1.0, densityRoll);
+            let sizeRoll = hash2(cell + vec2f(seed - 13.37, seed + 83.91));
+            let brightnessRoll = hash2(cell + vec2f(seed + 31.41, seed + 11.17));
+            let radius = mix({{STAR_MIN_RADIUS}}, {{STAR_MAX_RADIUS}}, sizeRoll * sizeRoll);
+            let starCenter = cell + randomPoint;
+            let distanceToStar = length(p - starCenter);
+            let normalizedDistance = distanceToStar / radius;
+            let disk = exp(-normalizedDistance * normalizedDistance * 4.5);
+
+            result = max(
+                result,
+                disk * starPresence * mix(0.55, 1.0, brightnessRoll)
+            );
+        }
+    }
+
+    return result;
+}
+
+fn starField(ray : vec3f, night : f32, moonAmount : f32, moonDisk : f32) -> vec3f {
+    let domeFade = smoothstep(-0.02, 0.18, ray.y);
+    let moonFade = 1.0 - smoothstep(0.90, 0.998, moonAmount) * 0.42;
+    let projection = ray.xz / max(ray.y + 0.38, 0.20);
+    let uvA = rotate2D(projection, 0.41);
+    let uvB = rotate2D(projection * 1.17 + vec2f(7.3, -3.8), -0.73);
+
+    let coolStars = starLayer(uvA, 42.0, 12.7);
+    let warmStars = starLayer(uvB, 28.0, 49.3);
+
+    return (
+        {{STAR_COOL_COLOR}} * coolStars +
+        {{STAR_WARM_COLOR}} * warmStars * 0.58
+    ) * {{STAR_BRIGHTNESS}} * night * domeFade * moonFade * (1.0 - moonDisk * 0.85);
+}
 
 @fragment
 fn fsSky(input : SkyVertexOut) -> @location(0) vec4f {
@@ -427,23 +632,47 @@ fn fsSky(input : SkyVertexOut) -> @location(0) vec4f {
     );
 
     let sunDir = sunDirection();
+    let moonDir = moonDirection(sunDir);
     let sunAmount = saturate(dot(ray, sunDir));
+    let moonAmount = saturate(dot(ray, moonDir));
+    let day = daylightAmount(sunDir);
+    let twilight = twilightAmount(sunDir);
+    let night = 1.0 - day;
+    let moonStrength = moonlightAmount(moonDir, day);
     let vertical = saturate(ray.y);
     let horizonHaze = exp(-abs(ray.y) * 7.0);
 
+    let dayHorizon = mix({{DAY_HORIZON_COLOR}}, sunriseHorizonColor(), twilight);
+    let dayZenith = mix({{DAY_ZENITH_COLOR}}, {{TWILIGHT_ZENITH_COLOR}}, twilight);
+    let nightHorizon = {{NIGHT_HORIZON_COLOR}};
+    let nightZenith = {{NIGHT_ZENITH_COLOR}};
+
     var sky = mix(
-        vec3f(0.64, 0.72, 0.80),
-        vec3f(0.24, 0.52, 0.92),
-        saturate(ray.y * 1.45 + 0.28)
+        mix(nightHorizon, dayHorizon, day),
+        mix(nightZenith, dayZenith, day),
+        saturate(ray.y * 1.30 + 0.25)
     );
-    sky = mix(sky, vec3f(0.05, 0.18, 0.46), pow(vertical, 1.35) * 0.62);
-    sky = mix(sky, vec3f(0.84, 0.89, 0.93), horizonHaze * 0.35);
+    sky = mix(sky, nightZenith, pow(vertical, 1.35) * night * 0.72);
+    sky = mix(sky, sunriseHorizonColor(), horizonHaze * twilight * 0.52);
 
     let warmScatter =
-        pow(sunAmount, 8.0) * 0.12 +
-        pow(sunAmount, 36.0) * 0.28;
-    sky = sky + vec3f(1.0, 0.74, 0.42) * warmScatter;
-    sky = mix(sky, vec3f(1.0, 0.88, 0.58), smoothstep(0.9991, 1.0, sunAmount));
+        pow(sunAmount, 8.0) * 0.18 +
+        pow(sunAmount, 36.0) * 0.42;
+    sky = sky + sunLightColor(sunDir) * warmScatter;
+    sky = mix(sky, sunLightColor(sunDir), smoothstep(0.9991, 1.0, sunAmount) * day);
+
+    let moonDisk = smoothstep(0.9988, 0.9997, moonAmount) * moonStrength;
+    let moonHalo = pow(moonAmount, 48.0) * moonStrength;
+    sky =
+        sky +
+        {{MOON_HALO_COLOR}} * moonHalo * 0.32;
+    sky = mix(
+        sky,
+        {{MOON_DISK_COLOR}},
+        moonDisk
+    );
+
+    sky = sky + starField(ray, night, moonAmount, moonDisk);
 
     let time = frame.cameraForwardAndTime.w;
     let cloudLayer =
@@ -457,13 +686,17 @@ fn fsSky(input : SkyVertexOut) -> @location(0) vec4f {
     let cloudMask =
         smoothstep(0.53, 0.77, broadCloud + fineCloud * 0.19) *
         cloudLayer;
-    let cloudLit = 0.72 + 0.28 * sunAmount;
+    let cloudLit = 0.42 + 0.58 * max(sunAmount, twilight * 0.55);
     let cloudColor = mix(
-        vec3f(0.72, 0.76, 0.80),
-        vec3f(1.0, 0.96, 0.89),
+        mix({{CLOUD_NIGHT_COLOR}}, {{CLOUD_TWILIGHT_COLOR}}, day),
+        mix({{CLOUD_DAY_COLOR}}, {{CLOUD_SUNSET_COLOR}}, twilight),
         cloudLit
     );
-    sky = mix(sky, cloudColor, cloudMask * 0.62);
+    sky = mix(
+        sky,
+        cloudColor,
+        cloudMask * mix(0.26, 0.62, saturate(day + twilight * 0.35))
+    );
 
     return vec4f(clamp(sky, vec3f(0.0), vec3f(1.0)), 1.0);
 }
@@ -557,7 +790,7 @@ fn bilinearShadowCompare(
     currentDepth : f32,
     bias : f32
 ) -> f32 {
-    let shadowMapSize = vec2f(1024.0, 1024.0);
+    let shadowMapSize = vec2f({{SHADOW_MAP_SIZE_FLOAT}}, {{SHADOW_MAP_SIZE_FLOAT}});
     let texelPosition = clamp(
         shadowUv * shadowMapSize - vec2f(0.5, 0.5),
         vec2f(0.0, 0.0),
@@ -662,34 +895,210 @@ fn softShadowAmount(
 fn fsMain(input : VertexOut) -> @location(0) vec4f {
     let n = input.normal;
     let isWater = input.color.a < 0.999;
+    let lightDir = sunDirection();
+    let moonDir = moonDirection(lightDir);
+    let day = daylightAmount(lightDir);
+    let twilight = twilightAmount(lightDir);
+    let moonStrength = moonlightAmount(moonDir, day);
 
     if (isWater) {
         if (n.y < 0.75) {
             discard;
         }
 
-        return vec4f(input.color.rgb, input.color.a);
+        let waterSunGlow =
+            smoothstep(0.25, 0.95, dot(normalize(frame.cameraForwardAndTime.xyz), lightDir));
+        let waterMoonGlow =
+            smoothstep(0.55, 0.95, dot(normalize(frame.cameraForwardAndTime.xyz), moonDir)) *
+            moonStrength;
+        let waterSkyTint =
+            mix({{WATER_NIGHT_TINT}}, {{WATER_DAY_TINT}}, day);
+        let waterColor =
+            input.color.rgb * waterSkyTint +
+            sunLightColor(lightDir) * (0.08 + waterSunGlow * 0.12) +
+            moonLightColor(moonDir, day) * (0.22 + waterMoonGlow * 0.34) +
+            sunriseHorizonColor() * twilight * 0.06;
+
+        return vec4f(clamp(waterColor, vec3f(0.0), vec3f(1.0)), input.color.a);
     }
 
-    let lightDir = sunDirection();
-    let diffuse = saturate(dot(n, lightDir));
-    let ambient = 0.22;
+    let diffuse = pow(saturate(dot(n, lightDir)), 1.15);
+    let moonDiffuse = pow(saturate(dot(n, moonDir)), 1.35);
+    let skyFacing = saturate(n.y * 0.5 + 0.5);
+    let horizonFacing = pow(saturate(dot(n, normalize(vec3f(lightDir.x, 0.0, lightDir.z)))), 2.0);
+    let upwardWarmth = smoothstep(0.20, 1.0, n.y);
 
-    let lighting = ambient + diffuse * 0.78;
+    let ambientColor =
+        mix(nightSkyAmbientColor(), daySkyAmbientColor(), day);
+    let ambientLight =
+        ambientColor * (0.28 + skyFacing * 0.38) +
+        sunriseSkyAmbientColor() * twilight * (0.20 + skyFacing * 0.18) +
+        sunriseHorizonColor() * horizonFacing * twilight * 0.16;
+    let directLight =
+        sunLightColor(lightDir) * diffuse * (0.92 + upwardWarmth * 0.22);
+    let moonLight =
+        moonLightColor(moonDir, day) * moonDiffuse * (0.36 + skyFacing * 0.28);
 
     // Step 3O: cached real shadow map. The expensive part now only runs
     // on upward-facing fragments inside manualShadowMapAmount.
     let realShadow = manualShadowMapAmount(input.worldPosition, n, lightDir);
-    let shadow = clamp(realShadow, 0.0, 0.62);
+    let shadow = clamp(realShadow * day, 0.0, 0.62);
 
-    let finalColor = input.color.rgb * lighting * (1.0 - shadow);
+    let finalColor =
+        input.color.rgb * (ambientLight + moonLight + directLight * (1.0 - shadow));
 
     return vec4f(finalColor, input.color.a);
 }
 )";
 
+    replaceAll(
+        wgsl,
+        "{{DAY_NIGHT_CYCLE_SECONDS}}",
+        wgslFloat(Settings::Time::dayNightCycleSeconds)
+    );
+    replaceAll(
+        wgsl,
+        "{{DAY_NIGHT_START_PHASE}}",
+        wgslFloat(Settings::Time::dayNightStartPhase)
+    );
+    replaceAll(
+        wgsl,
+        "{{SHADOW_MAP_SIZE_FLOAT}}",
+        wgslFloat(static_cast<float>(Settings::Shadow::mapSize))
+    );
+    replaceAll(
+        wgsl,
+        "{{SUNRISE_SUN_COLOR}}",
+        wgslColor(Settings::Lighting::sunriseSun)
+    );
+    replaceAll(
+        wgsl,
+        "{{HIGH_SUN_COLOR}}",
+        wgslColor(Settings::Lighting::highSun)
+    );
+    replaceAll(
+        wgsl,
+        "{{SUNRISE_SKY_AMBIENT_COLOR}}",
+        wgslColor(Settings::Lighting::sunriseSkyAmbient)
+    );
+    replaceAll(
+        wgsl,
+        "{{DAY_SKY_AMBIENT_COLOR}}",
+        wgslColor(Settings::Lighting::daySkyAmbient)
+    );
+    replaceAll(
+        wgsl,
+        "{{NIGHT_SKY_AMBIENT_COLOR}}",
+        wgslColor(Settings::Lighting::nightSkyAmbient)
+    );
+    replaceAll(
+        wgsl,
+        "{{SUNRISE_HORIZON_COLOR}}",
+        wgslColor(Settings::Lighting::sunriseHorizon)
+    );
+    replaceAll(
+        wgsl,
+        "{{MOON_LIGHT_COLOR}}",
+        wgslColor(Settings::Lighting::moonLight)
+    );
+    replaceAll(
+        wgsl,
+        "{{DAY_HORIZON_COLOR}}",
+        wgslColor(Settings::Lighting::dayHorizon)
+    );
+    replaceAll(
+        wgsl,
+        "{{DAY_ZENITH_COLOR}}",
+        wgslColor(Settings::Lighting::dayZenith)
+    );
+    replaceAll(
+        wgsl,
+        "{{TWILIGHT_ZENITH_COLOR}}",
+        wgslColor(Settings::Lighting::twilightZenith)
+    );
+    replaceAll(
+        wgsl,
+        "{{NIGHT_HORIZON_COLOR}}",
+        wgslColor(Settings::Lighting::nightHorizon)
+    );
+    replaceAll(
+        wgsl,
+        "{{NIGHT_ZENITH_COLOR}}",
+        wgslColor(Settings::Lighting::nightZenith)
+    );
+    replaceAll(
+        wgsl,
+        "{{MOON_HALO_COLOR}}",
+        wgslColor(Settings::Lighting::moonHalo)
+    );
+    replaceAll(
+        wgsl,
+        "{{MOON_DISK_COLOR}}",
+        wgslColor(Settings::Lighting::moonDisk)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_COOL_COLOR}}",
+        wgslColor(Settings::Lighting::starCool)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_WARM_COLOR}}",
+        wgslColor(Settings::Lighting::starWarm)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_BRIGHTNESS}}",
+        wgslFloat(Settings::Lighting::starBrightness)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_DENSITY_THRESHOLD}}",
+        wgslFloat(Settings::Lighting::starDensityThreshold)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_MIN_RADIUS}}",
+        wgslFloat(Settings::Lighting::starMinRadius)
+    );
+    replaceAll(
+        wgsl,
+        "{{STAR_MAX_RADIUS}}",
+        wgslFloat(Settings::Lighting::starMaxRadius)
+    );
+    replaceAll(
+        wgsl,
+        "{{CLOUD_NIGHT_COLOR}}",
+        wgslColor(Settings::Lighting::cloudNight)
+    );
+    replaceAll(
+        wgsl,
+        "{{CLOUD_TWILIGHT_COLOR}}",
+        wgslColor(Settings::Lighting::cloudTwilight)
+    );
+    replaceAll(
+        wgsl,
+        "{{CLOUD_DAY_COLOR}}",
+        wgslColor(Settings::Lighting::cloudDay)
+    );
+    replaceAll(
+        wgsl,
+        "{{CLOUD_SUNSET_COLOR}}",
+        wgslColor(Settings::Lighting::cloudSunset)
+    );
+    replaceAll(
+        wgsl,
+        "{{WATER_NIGHT_TINT}}",
+        wgslColor(Settings::Lighting::waterNightTint)
+    );
+    replaceAll(
+        wgsl,
+        "{{WATER_DAY_TINT}}",
+        wgslColor(Settings::Lighting::waterDayTint)
+    );
+
     wgpu::ShaderSourceWGSL source{};
-    source.code = wgsl;
+    source.code = wgsl.c_str();
 
     wgpu::ShaderModuleDescriptor desc{};
     desc.nextInChain = &source;
@@ -1148,6 +1557,13 @@ void WebGpuRenderer::render(
     glm::vec3 forward = getCameraForward(camera);
     glm::vec3 cameraUp = getCameraUp(camera);
     glm::vec3 cameraRight = glm::normalize(glm::cross(forward, cameraUp));
+    const float currentTimeSeconds =
+        static_cast<float>(SDL_GetTicks()) * 0.001f;
+    const glm::vec3 sunDir =
+        sunDirectionForPhase(dayCyclePhaseForTime(currentTimeSeconds));
+    const float daylightAmount = daylightAmountForSunDirection(sunDir);
+    const uint64_t shadowLightStep =
+        shadowLightStepForTime(currentTimeSeconds);
 
     glm::mat4 view =
         glm::lookAt(
@@ -1156,8 +1572,9 @@ void WebGpuRenderer::render(
             cameraUp
         );
 
-    constexpr float verticalFovDegrees = 45.0f;
-    constexpr float cameraFarClipDistance = 500.0f;
+    constexpr float verticalFovDegrees = Settings::Camera::verticalFovDegrees;
+    constexpr float cameraNearClipDistance = Settings::Camera::nearClipDistance;
+    constexpr float cameraFarClipDistance = Settings::Camera::farClipDistance;
     float aspect =
         static_cast<float>(surfaceConfig_.width) /
         static_cast<float>(surfaceConfig_.height);
@@ -1166,29 +1583,32 @@ void WebGpuRenderer::render(
         glm::perspective(
             glm::radians(verticalFovDegrees),
             aspect,
-            0.1f,
+            cameraNearClipDistance,
             cameraFarClipDistance
         );
 
     proj[1][1] *= -1.0f;
 
     const bool shadowMapNeedsUpdate =
+        daylightAmount > 0.01f &&
         !prisms.empty() &&
         (
             !shadowMapValid_ ||
             cachedShadowRevision_ != prismRevision ||
-            cachedShadowPrismCount_ != prisms.size()
+            cachedShadowPrismCount_ != prisms.size() ||
+            cachedShadowLightStep_ != shadowLightStep
         );
 
-    if (prisms.empty()) {
+    if (prisms.empty() || daylightAmount <= 0.01f) {
         cachedLightViewProjection_ = glm::mat4(1.0f);
-        cachedShadowRevision_ = prismRevision;
-        cachedShadowPrismCount_ = 0;
+        cachedShadowRevision_ = prisms.empty()
+            ? prismRevision
+            : cachedShadowRevision_;
+        cachedShadowPrismCount_ = prisms.empty()
+            ? 0
+            : cachedShadowPrismCount_;
         shadowMapValid_ = false;
     } else if (shadowMapNeedsUpdate) {
-        const glm::vec3 sunDir =
-            glm::normalize(glm::vec3(0.52f, 0.66f, -0.54f));
-
         glm::vec3 shadowMin = prisms.front().position;
         glm::vec3 shadowMax = prisms.front().position;
 
@@ -1200,8 +1620,16 @@ void WebGpuRenderer::render(
         // Include prism geometry radius/height plus extra room for tree tops
         // and for casters just outside the camera view. Keep this margin
         // moderate so the 1024 shadow map has enough detail for tree shadows.
-        shadowMin -= glm::vec3(8.0f, 4.0f, 8.0f);
-        shadowMax += glm::vec3(8.0f, 18.0f, 8.0f);
+        shadowMin -= glm::vec3(
+            Settings::Shadow::boundsHorizontalMargin,
+            Settings::Shadow::boundsBottomMargin,
+            Settings::Shadow::boundsHorizontalMargin
+        );
+        shadowMax += glm::vec3(
+            Settings::Shadow::boundsHorizontalMargin,
+            Settings::Shadow::boundsTopMargin,
+            Settings::Shadow::boundsHorizontalMargin
+        );
 
         glm::vec3 shadowCenter = (shadowMin + shadowMax) * 0.5f;
         shadowCenter.y = std::max(shadowCenter.y, 8.0f);
@@ -1234,7 +1662,12 @@ void WebGpuRenderer::render(
             maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightTrueUp)));
         }
 
-        const float shadowHalfExtent = std::clamp(maxProjectedRadius + 8.0f, 48.0f, 140.0f);
+        const float shadowHalfExtent =
+            std::clamp(
+                maxProjectedRadius + Settings::Shadow::halfExtentPadding,
+                Settings::Shadow::minHalfExtent,
+                Settings::Shadow::maxHalfExtent
+            );
         const float shadowDistance = shadowHalfExtent * 2.0f;
         const float shadowFarPlane = shadowHalfExtent * 4.0f;
 
@@ -1282,7 +1715,7 @@ void WebGpuRenderer::render(
     frameUniforms.cameraForwardAndTime =
         glm::vec4(
             forward,
-            static_cast<float>(SDL_GetTicks()) * 0.001f
+            currentTimeSeconds
         );
 
     queue_.WriteBuffer(
@@ -1360,6 +1793,7 @@ void WebGpuRenderer::render(
         shadowMapValid_ = true;
         cachedShadowRevision_ = prismRevision;
         cachedShadowPrismCount_ = prisms.size();
+        cachedShadowLightStep_ = shadowLightStep;
     }
 
     wgpu::RenderPassColorAttachment colorAttachment{};

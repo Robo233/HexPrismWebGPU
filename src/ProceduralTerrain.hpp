@@ -2,17 +2,18 @@
 
 #include "HexGrid.hpp"
 #include "Prism.hpp"
+#include "Settings.hpp"
 
 #include <glm/glm.hpp>
 
 #include <vector>
 
 struct ProceduralTerrainSettings {
-    int seed = 6564;
-    int renderRadius = 400;
-    int rebuildStride = 16;
-    int minTerrainHeight = 1;
-    int maxTerrainHeight = 256;
+    int seed = Settings::Terrain::seed;
+    int renderRadius = Settings::Terrain::renderRadius;
+    int rebuildStride = Settings::Terrain::rebuildStride;
+    int minTerrainHeight = Settings::Terrain::minHeight;
+    int maxTerrainHeight = Settings::Terrain::maxHeight;
 };
 
 struct TerrainBuildResult {

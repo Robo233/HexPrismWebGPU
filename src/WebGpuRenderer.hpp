@@ -3,6 +3,7 @@
 #include "Camera.hpp"
 #include "HexPrismMesh.hpp"
 #include "Prism.hpp"
+#include "Settings.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -54,13 +55,14 @@ private:
 
     wgpu::Texture depthTexture_;
 
-    static constexpr uint32_t ShadowMapSize = 1024;
+    static constexpr uint32_t ShadowMapSize = Settings::Shadow::mapSize;
     wgpu::Texture shadowDepthTexture_;
     wgpu::TextureView shadowDepthTextureView_;
 
     glm::mat4 cachedLightViewProjection_{1.0f};
     uint64_t cachedShadowRevision_ = UINT64_MAX;
     std::size_t cachedShadowPrismCount_ = static_cast<std::size_t>(-1);
+    uint64_t cachedShadowLightStep_ = UINT64_MAX;
     bool shadowMapValid_ = false;
 
     MeshData prismMesh_;
