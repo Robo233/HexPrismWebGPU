@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
 
 static std::ostream& operator<<(std::ostream& os, wgpu::StringView view) {
@@ -281,6 +282,9 @@ wgpu::ShaderModule WebGpuRenderer::createShaderModule() {
     const char* wgsl = R"(
 struct FrameUniforms {
     viewProjection : mat4x4f,
+    cameraRightAndAspect : vec4f,
+    cameraUpAndTanHalfFov : vec4f,
+    cameraForwardAndTime : vec4f,
 };
 
 @group(0) @binding(0)
@@ -298,6 +302,118 @@ struct VertexOut {
     @location(0) normal : vec3f,
     @location(1) color : vec4f,
 };
+
+struct SkyVertexOut {
+    @builtin(position) position : vec4f,
+    @location(0) ndc : vec2f,
+};
+
+@vertex
+fn vsSky(@builtin(vertex_index) vertexIndex : u32) -> SkyVertexOut {
+    var out : SkyVertexOut;
+    let positions = array<vec2f, 3>(
+        vec2f(-1.0, -1.0),
+        vec2f(3.0, -1.0),
+        vec2f(-1.0, 3.0)
+    );
+    let ndc = positions[vertexIndex];
+
+    out.position = vec4f(ndc, 1.0, 1.0);
+    out.ndc = ndc;
+
+    return out;
+}
+
+fn saturate(value : f32) -> f32 {
+    return clamp(value, 0.0, 1.0);
+}
+
+fn hash2(p : vec2f) -> f32 {
+    return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+}
+
+fn valueNoise(p : vec2f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+
+    let a = hash2(i);
+    let b = hash2(i + vec2f(1.0, 0.0));
+    let c = hash2(i + vec2f(0.0, 1.0));
+    let d = hash2(i + vec2f(1.0, 1.0));
+
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fbm(p : vec2f) -> f32 {
+    var q = p;
+    var amplitude = 0.5;
+    var total = 0.0;
+    var normalization = 0.0;
+
+    for (var i = 0; i < 5; i = i + 1) {
+        total = total + valueNoise(q) * amplitude;
+        normalization = normalization + amplitude;
+        q = q * 2.03 + vec2f(17.2, 11.7);
+        amplitude = amplitude * 0.52;
+    }
+
+    return total / normalization;
+}
+
+@fragment
+fn fsSky(input : SkyVertexOut) -> @location(0) vec4f {
+    let aspect = frame.cameraRightAndAspect.w;
+    let tanHalfFov = frame.cameraUpAndTanHalfFov.w;
+    let screen = vec2f(input.ndc.x, -input.ndc.y);
+
+    let ray = normalize(
+        frame.cameraForwardAndTime.xyz +
+        frame.cameraRightAndAspect.xyz * screen.x * aspect * tanHalfFov +
+        frame.cameraUpAndTanHalfFov.xyz * screen.y * tanHalfFov
+    );
+
+    let sunDir = normalize(vec3f(0.52, 0.66, -0.54));
+    let sunAmount = saturate(dot(ray, sunDir));
+    let vertical = saturate(ray.y);
+    let horizonHaze = exp(-abs(ray.y) * 7.0);
+
+    var sky = mix(
+        vec3f(0.64, 0.72, 0.80),
+        vec3f(0.24, 0.52, 0.92),
+        saturate(ray.y * 1.45 + 0.28)
+    );
+    sky = mix(sky, vec3f(0.05, 0.18, 0.46), pow(vertical, 1.35) * 0.62);
+    sky = mix(sky, vec3f(0.84, 0.89, 0.93), horizonHaze * 0.35);
+
+    let warmScatter =
+        pow(sunAmount, 8.0) * 0.12 +
+        pow(sunAmount, 36.0) * 0.28;
+    sky = sky + vec3f(1.0, 0.74, 0.42) * warmScatter;
+    sky = mix(sky, vec3f(1.0, 0.88, 0.58), smoothstep(0.9991, 1.0, sunAmount));
+
+    let time = frame.cameraForwardAndTime.w;
+    let cloudLayer =
+        smoothstep(0.03, 0.22, ray.y) *
+        (1.0 - smoothstep(0.70, 0.93, ray.y));
+    let cloudPlaneUv =
+        ray.xz / max(ray.y + 0.18, 0.12) +
+        vec2f(time * 0.012, time * 0.004);
+    let broadCloud = fbm(cloudPlaneUv * 0.55);
+    let fineCloud = fbm(cloudPlaneUv * 2.2 + vec2f(3.7, 8.1));
+    let cloudMask =
+        smoothstep(0.53, 0.77, broadCloud + fineCloud * 0.19) *
+        cloudLayer;
+    let cloudLit = 0.72 + 0.28 * sunAmount;
+    let cloudColor = mix(
+        vec3f(0.72, 0.76, 0.80),
+        vec3f(1.0, 0.96, 0.89),
+        cloudLit
+    );
+    sky = mix(sky, cloudColor, cloudMask * 0.62);
+
+    return vec4f(clamp(sky, vec3f(0.0), vec3f(1.0)), 1.0);
+}
 
 @vertex
 fn vsMain(input : VertexIn) -> VertexOut {
@@ -341,7 +457,7 @@ fn vsMain(input : VertexIn) -> VertexOut {
 
 @fragment
 fn fsMain(input : VertexOut) -> @location(0) vec4f {
-    let lightDir = normalize(vec3f(0.4, 0.7, 1.0));
+    let lightDir = normalize(vec3f(0.52, 0.66, -0.54));
     let n = normalize(input.normal);
 
     let diffuse = max(dot(n, lightDir), 0.0);
@@ -367,7 +483,8 @@ bool WebGpuRenderer::createPipeline() {
     wgpu::BindGroupLayoutEntry bindEntry{};
     bindEntry.binding = 0;
     bindEntry.visibility =
-        wgpu::ShaderStage::Vertex;
+        wgpu::ShaderStage::Vertex |
+        wgpu::ShaderStage::Fragment;
     bindEntry.buffer.type = wgpu::BufferBindingType::Uniform;
     bindEntry.buffer.minBindingSize = sizeof(FrameUniforms);
 
@@ -460,6 +577,36 @@ bool WebGpuRenderer::createPipeline() {
     depthStencil.format = wgpu::TextureFormat::Depth24Plus;
     depthStencil.depthWriteEnabled = true;
     depthStencil.depthCompare = wgpu::CompareFunction::Less;
+
+    wgpu::DepthStencilState skyDepthStencil{};
+    skyDepthStencil.format = wgpu::TextureFormat::Depth24Plus;
+    skyDepthStencil.depthWriteEnabled = false;
+    skyDepthStencil.depthCompare = wgpu::CompareFunction::Always;
+
+    wgpu::FragmentState skyFragment{};
+    skyFragment.module = shader;
+    skyFragment.entryPoint = "fsSky";
+    skyFragment.targetCount = 1;
+    skyFragment.targets = &colorTarget;
+
+    wgpu::RenderPipelineDescriptor skyPipelineDesc{};
+    skyPipelineDesc.layout = pipelineLayout_;
+    skyPipelineDesc.vertex.module = shader;
+    skyPipelineDesc.vertex.entryPoint = "vsSky";
+    skyPipelineDesc.vertex.bufferCount = 0;
+    skyPipelineDesc.vertex.buffers = nullptr;
+    skyPipelineDesc.fragment = &skyFragment;
+    skyPipelineDesc.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+    skyPipelineDesc.primitive.cullMode = wgpu::CullMode::None;
+    skyPipelineDesc.depthStencil = &skyDepthStencil;
+    skyPipelineDesc.multisample.count = 1;
+
+    skyPipeline_ = device_.CreateRenderPipeline(&skyPipelineDesc);
+
+    if (!skyPipeline_) {
+        std::cerr << "Failed to create sky render pipeline.\n";
+        return false;
+    }
 
     wgpu::RenderPipelineDescriptor pipelineDesc{};
     pipelineDesc.layout = pipelineLayout_;
@@ -670,11 +817,15 @@ void WebGpuRenderer::render(
             getCameraUp(camera)
         );
 
+    constexpr float verticalFovDegrees = 45.0f;
+    float aspect =
+        static_cast<float>(surfaceConfig_.width) /
+        static_cast<float>(surfaceConfig_.height);
+
     glm::mat4 proj =
         glm::perspective(
-            glm::radians(45.0f),
-            static_cast<float>(surfaceConfig_.width) /
-                static_cast<float>(surfaceConfig_.height),
+            glm::radians(verticalFovDegrees),
+            aspect,
             0.1f,
             100.0f
         );
@@ -683,6 +834,18 @@ void WebGpuRenderer::render(
 
     FrameUniforms frameUniforms{};
     frameUniforms.viewProjection = proj * view;
+    frameUniforms.cameraRightAndAspect =
+        glm::vec4(getCameraRight(camera), aspect);
+    frameUniforms.cameraUpAndTanHalfFov =
+        glm::vec4(
+            getCameraUp(camera),
+            std::tan(glm::radians(verticalFovDegrees) * 0.5f)
+        );
+    frameUniforms.cameraForwardAndTime =
+        glm::vec4(
+            forward,
+            static_cast<float>(SDL_GetTicks()) * 0.001f
+        );
 
     queue_.WriteBuffer(
         frameUniformBuffer_,
@@ -744,6 +907,10 @@ void WebGpuRenderer::render(
 
     wgpu::RenderPassEncoder pass =
         encoder.BeginRenderPass(&passDesc);
+
+    pass.SetPipeline(skyPipeline_);
+    pass.SetBindGroup(0, frameBindGroup_);
+    pass.Draw(3);
 
     pass.SetPipeline(pipeline_);
     pass.SetBindGroup(0, frameBindGroup_);

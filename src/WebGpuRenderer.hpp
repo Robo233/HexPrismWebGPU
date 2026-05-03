@@ -29,6 +29,9 @@ public:
 private:
     struct FrameUniforms {
         glm::mat4 viewProjection;
+        glm::vec4 cameraRightAndAspect;
+        glm::vec4 cameraUpAndTanHalfFov;
+        glm::vec4 cameraForwardAndTime;
     };
 
     struct PrismInstanceData {
@@ -64,6 +67,7 @@ private:
 
     wgpu::BindGroupLayout frameBindGroupLayout_;
     wgpu::PipelineLayout pipelineLayout_;
+    wgpu::RenderPipeline skyPipeline_;
     wgpu::RenderPipeline pipeline_;
 
     bool createInstance();
