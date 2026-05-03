@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <iostream>
 
@@ -278,33 +279,62 @@ bool WebGpuRenderer::createPrismBuffers() {
 
 wgpu::ShaderModule WebGpuRenderer::createShaderModule() {
     const char* wgsl = R"(
-struct ObjectUniforms {
-    mvp : mat4x4f,
-    model : mat4x4f,
-    color : vec4f,
+struct FrameUniforms {
+    viewProjection : mat4x4f,
 };
 
 @group(0) @binding(0)
-var<uniform> object : ObjectUniforms;
+var<uniform> frame : FrameUniforms;
 
 struct VertexIn {
     @location(0) position : vec3f,
     @location(1) normal : vec3f,
+    @location(2) positionAndCos : vec4f,
+    @location(3) colorAndSin : vec4f,
 };
 
 struct VertexOut {
     @builtin(position) position : vec4f,
     @location(0) normal : vec3f,
+    @location(1) color : vec4f,
 };
 
 @vertex
 fn vsMain(input : VertexIn) -> VertexOut {
     var out : VertexOut;
 
-    out.position = object.mvp * vec4f(input.position, 1.0);
+    let uprightPosition = vec3f(
+        input.position.x,
+        input.position.z,
+        -input.position.y
+    );
+    let uprightNormal = vec3f(
+        input.normal.x,
+        input.normal.z,
+        -input.normal.y
+    );
 
-    // Correct as long as model has no non-uniform scale.
-    out.normal = normalize((object.model * vec4f(input.normal, 0.0)).xyz);
+    let c = input.positionAndCos.w;
+    let s = input.colorAndSin.w;
+
+    let rotatedPosition = vec3f(
+        uprightPosition.x * c + uprightPosition.z * s,
+        uprightPosition.y,
+        -uprightPosition.x * s + uprightPosition.z * c
+    );
+
+    let rotatedNormal = normalize(vec3f(
+        uprightNormal.x * c + uprightNormal.z * s,
+        uprightNormal.y,
+        -uprightNormal.x * s + uprightNormal.z * c
+    ));
+
+    out.position = frame.viewProjection * vec4f(
+        rotatedPosition + input.positionAndCos.xyz,
+        1.0
+    );
+    out.normal = rotatedNormal;
+    out.color = vec4f(input.colorAndSin.rgb, 1.0);
 
     return out;
 }
@@ -318,7 +348,7 @@ fn fsMain(input : VertexOut) -> @location(0) vec4f {
     let ambient = 0.22;
 
     let lighting = ambient + diffuse * 0.78;
-    let finalColor = object.color.rgb * lighting;
+    let finalColor = input.color.rgb * lighting;
 
     return vec4f(finalColor, 1.0);
 }
@@ -337,43 +367,84 @@ bool WebGpuRenderer::createPipeline() {
     wgpu::BindGroupLayoutEntry bindEntry{};
     bindEntry.binding = 0;
     bindEntry.visibility =
-        wgpu::ShaderStage::Vertex |
-        wgpu::ShaderStage::Fragment;
+        wgpu::ShaderStage::Vertex;
     bindEntry.buffer.type = wgpu::BufferBindingType::Uniform;
-    bindEntry.buffer.minBindingSize = sizeof(ObjectUniforms);
+    bindEntry.buffer.minBindingSize = sizeof(FrameUniforms);
 
     wgpu::BindGroupLayoutDescriptor bindLayoutDesc{};
     bindLayoutDesc.entryCount = 1;
     bindLayoutDesc.entries = &bindEntry;
 
-    objectBindGroupLayout_ =
+    frameBindGroupLayout_ =
         device_.CreateBindGroupLayout(&bindLayoutDesc);
+
+    wgpu::BufferDescriptor frameUniformDesc{};
+    frameUniformDesc.size = sizeof(FrameUniforms);
+    frameUniformDesc.usage =
+        wgpu::BufferUsage::Uniform |
+        wgpu::BufferUsage::CopyDst;
+    frameUniformDesc.mappedAtCreation = false;
+
+    frameUniformBuffer_ =
+        device_.CreateBuffer(&frameUniformDesc);
+
+    wgpu::BindGroupEntry frameBindEntry{};
+    frameBindEntry.binding = 0;
+    frameBindEntry.buffer = frameUniformBuffer_;
+    frameBindEntry.offset = 0;
+    frameBindEntry.size = sizeof(FrameUniforms);
+
+    wgpu::BindGroupDescriptor frameBindDesc{};
+    frameBindDesc.layout = frameBindGroupLayout_;
+    frameBindDesc.entryCount = 1;
+    frameBindDesc.entries = &frameBindEntry;
+
+    frameBindGroup_ =
+        device_.CreateBindGroup(&frameBindDesc);
 
     wgpu::PipelineLayoutDescriptor pipelineLayoutDesc{};
     pipelineLayoutDesc.bindGroupLayoutCount = 1;
-    pipelineLayoutDesc.bindGroupLayouts = &objectBindGroupLayout_;
+    pipelineLayoutDesc.bindGroupLayouts = &frameBindGroupLayout_;
 
     pipelineLayout_ =
         device_.CreatePipelineLayout(&pipelineLayoutDesc);
 
     wgpu::ShaderModule shader = createShaderModule();
 
-    std::array<wgpu::VertexAttribute, 2> attributes{};
+    std::array<wgpu::VertexAttribute, 2> vertexAttributes{};
 
-    attributes[0].shaderLocation = 0;
-    attributes[0].offset = offsetof(PrismVertex, px);
-    attributes[0].format = wgpu::VertexFormat::Float32x3;
+    vertexAttributes[0].shaderLocation = 0;
+    vertexAttributes[0].offset = offsetof(PrismVertex, px);
+    vertexAttributes[0].format = wgpu::VertexFormat::Float32x3;
 
-    attributes[1].shaderLocation = 1;
-    attributes[1].offset = offsetof(PrismVertex, nx);
-    attributes[1].format = wgpu::VertexFormat::Float32x3;
+    vertexAttributes[1].shaderLocation = 1;
+    vertexAttributes[1].offset = offsetof(PrismVertex, nx);
+    vertexAttributes[1].format = wgpu::VertexFormat::Float32x3;
 
-    wgpu::VertexBufferLayout vertexLayout{};
-    vertexLayout.arrayStride = sizeof(PrismVertex);
-    vertexLayout.stepMode = wgpu::VertexStepMode::Vertex;
-    vertexLayout.attributeCount =
-        static_cast<uint32_t>(attributes.size());
-    vertexLayout.attributes = attributes.data();
+    wgpu::VertexBufferLayout vertexLayouts[2]{};
+    vertexLayouts[0].arrayStride = sizeof(PrismVertex);
+    vertexLayouts[0].stepMode = wgpu::VertexStepMode::Vertex;
+    vertexLayouts[0].attributeCount =
+        static_cast<uint32_t>(vertexAttributes.size());
+    vertexLayouts[0].attributes = vertexAttributes.data();
+
+    std::array<wgpu::VertexAttribute, 2> instanceAttributes{};
+
+    instanceAttributes[0].shaderLocation = 2;
+    instanceAttributes[0].offset =
+        offsetof(PrismInstanceData, positionAndCos);
+    instanceAttributes[0].format = wgpu::VertexFormat::Float32x4;
+
+    instanceAttributes[1].shaderLocation = 3;
+    instanceAttributes[1].offset =
+        offsetof(PrismInstanceData, colorAndSin);
+    instanceAttributes[1].format = wgpu::VertexFormat::Float32x4;
+
+    vertexLayouts[1].arrayStride = sizeof(PrismInstanceData);
+    vertexLayouts[1].stepMode = wgpu::VertexStepMode::Instance;
+    vertexLayouts[1].attributeCount =
+        static_cast<uint32_t>(instanceAttributes.size());
+    vertexLayouts[1].attributes = instanceAttributes.data();
 
     wgpu::ColorTargetState colorTarget{};
     colorTarget.format = surfaceFormat_;
@@ -395,8 +466,8 @@ bool WebGpuRenderer::createPipeline() {
 
     pipelineDesc.vertex.module = shader;
     pipelineDesc.vertex.entryPoint = "vsMain";
-    pipelineDesc.vertex.bufferCount = 1;
-    pipelineDesc.vertex.buffers = &vertexLayout;
+    pipelineDesc.vertex.bufferCount = 2;
+    pipelineDesc.vertex.buffers = vertexLayouts;
 
     pipelineDesc.fragment = &fragment;
     pipelineDesc.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
@@ -489,84 +560,106 @@ bool WebGpuRenderer::resizeIfNeeded() {
     return static_cast<bool>(depthTexture_);
 }
 
-void WebGpuRenderer::ensureObjectUniformCapacity(std::size_t count) {
-    while (objectUniformBuffers_.size() < count) {
-        wgpu::BufferDescriptor uniformDesc{};
-        uniformDesc.size = sizeof(ObjectUniforms);
-        uniformDesc.usage =
-            wgpu::BufferUsage::Uniform |
-            wgpu::BufferUsage::CopyDst;
-        uniformDesc.mappedAtCreation = false;
-
-        wgpu::Buffer uniformBuffer =
-            device_.CreateBuffer(&uniformDesc);
-
-        wgpu::BindGroupEntry bgEntry{};
-        bgEntry.binding = 0;
-        bgEntry.buffer = uniformBuffer;
-        bgEntry.offset = 0;
-        bgEntry.size = sizeof(ObjectUniforms);
-
-        wgpu::BindGroupDescriptor bindGroupDesc{};
-        bindGroupDesc.layout = objectBindGroupLayout_;
-        bindGroupDesc.entryCount = 1;
-        bindGroupDesc.entries = &bgEntry;
-
-        wgpu::BindGroup bindGroup =
-            device_.CreateBindGroup(&bindGroupDesc);
-
-        objectUniformBuffers_.push_back(uniformBuffer);
-        objectBindGroups_.push_back(bindGroup);
+void WebGpuRenderer::ensurePrismInstanceBufferCapacity(
+    std::size_t count
+) {
+    if (count <= prismInstanceCapacity_) {
+        return;
     }
+
+    prismInstanceCapacity_ = std::max<std::size_t>(count, 1);
+
+    wgpu::BufferDescriptor instanceDesc{};
+    instanceDesc.size =
+        prismInstanceCapacity_ * sizeof(PrismInstanceData);
+    instanceDesc.usage =
+        wgpu::BufferUsage::Vertex |
+        wgpu::BufferUsage::CopyDst;
+    instanceDesc.mappedAtCreation = false;
+
+    prismInstanceBuffer_ =
+        device_.CreateBuffer(&instanceDesc);
 }
 
-glm::mat4 WebGpuRenderer::createPrismModelMatrix(
-    const Prism& prism
-) const {
-    glm::mat4 translation =
-        glm::translate(
-            glm::mat4(1.0f),
-            prism.position
-        );
-
-    // Mesh is authored along Z. The negative rotation puts the front cap on
-    // top after the prism is stood upright, so its normal faces upward.
-    glm::mat4 uprightRotation =
-        glm::rotate(
-            glm::mat4(1.0f),
-            glm::radians(-90.0f),
-            glm::vec3(1.0f, 0.0f, 0.0f)
-        );
-
-    int step = prism.rotationStep % 6;
-
-    if (step < 0) {
-        step += 6;
+void WebGpuRenderer::updatePrismInstanceBuffer(
+    const std::vector<Prism>& prisms,
+    uint64_t prismRevision
+) {
+    if (prisms.empty()) {
+        uploadedPrismRevision_ = prismRevision;
+        uploadedPrismCount_ = 0;
+        return;
     }
 
-    float angleDegrees = static_cast<float>(step) * 60.0f;
+    if (
+        prismRevision != 0 &&
+        uploadedPrismRevision_ == prismRevision &&
+        uploadedPrismCount_ == prisms.size()
+    ) {
+        return;
+    }
 
-    glm::mat4 hexRotation =
-        glm::rotate(
-            glm::mat4(1.0f),
-            glm::radians(angleDegrees),
-            glm::vec3(0.0f, 1.0f, 0.0f)
-        );
+    ensurePrismInstanceBufferCapacity(prisms.size());
 
-    return translation * hexRotation * uprightRotation;
+    prismInstanceData_.resize(prisms.size());
+
+    constexpr std::array<float, 6> rotationCos{
+        1.0f,
+        0.5f,
+        -0.5f,
+        -1.0f,
+        -0.5f,
+        0.5f
+    };
+    constexpr std::array<float, 6> rotationSin{
+        0.0f,
+        0.8660254038f,
+        0.8660254038f,
+        0.0f,
+        -0.8660254038f,
+        -0.8660254038f
+    };
+
+    for (std::size_t i = 0; i < prisms.size(); ++i) {
+        int step = prisms[i].rotationStep % 6;
+
+        if (step < 0) {
+            step += 6;
+        }
+
+        prismInstanceData_[i] = PrismInstanceData{
+            glm::vec4(
+                prisms[i].position,
+                rotationCos[static_cast<std::size_t>(step)]
+            ),
+            glm::vec4(
+                prisms[i].color,
+                rotationSin[static_cast<std::size_t>(step)]
+            )
+        };
+    }
+
+    queue_.WriteBuffer(
+        prismInstanceBuffer_,
+        0,
+        prismInstanceData_.data(),
+        prismInstanceData_.size() * sizeof(PrismInstanceData)
+    );
+
+    uploadedPrismRevision_ = prismRevision;
+    uploadedPrismCount_ = prisms.size();
 }
 
 void WebGpuRenderer::render(
     const std::vector<Prism>& prisms,
-    const Camera& camera
+    const Camera& camera,
+    uint64_t prismRevision
 ) {
     instance_.ProcessEvents();
 
     if (!resizeIfNeeded()) {
         return;
     }
-
-    ensureObjectUniformCapacity(prisms.size());
 
     glm::vec3 forward = getCameraForward(camera);
 
@@ -588,21 +681,17 @@ void WebGpuRenderer::render(
 
     proj[1][1] *= -1.0f;
 
-    for (std::size_t i = 0; i < prisms.size(); ++i) {
-        glm::mat4 model = createPrismModelMatrix(prisms[i]);
+    FrameUniforms frameUniforms{};
+    frameUniforms.viewProjection = proj * view;
 
-        ObjectUniforms uniforms{};
-        uniforms.model = model;
-        uniforms.mvp = proj * view * model;
-        uniforms.color = glm::vec4(prisms[i].color, 1.0f);
+    queue_.WriteBuffer(
+        frameUniformBuffer_,
+        0,
+        &frameUniforms,
+        sizeof(FrameUniforms)
+    );
 
-        queue_.WriteBuffer(
-            objectUniformBuffers_[i],
-            0,
-            &uniforms,
-            sizeof(ObjectUniforms)
-        );
-    }
+    updatePrismInstanceBuffer(prisms, prismRevision);
 
     wgpu::SurfaceTexture surfaceTexture{};
     surface_.GetCurrentTexture(&surfaceTexture);
@@ -657,14 +746,15 @@ void WebGpuRenderer::render(
         encoder.BeginRenderPass(&passDesc);
 
     pass.SetPipeline(pipeline_);
+    pass.SetBindGroup(0, frameBindGroup_);
     pass.SetVertexBuffer(0, prismVertexBuffer_);
     pass.SetIndexBuffer(prismIndexBuffer_, wgpu::IndexFormat::Uint16);
 
-    for (std::size_t i = 0; i < prisms.size(); ++i) {
-        pass.SetBindGroup(0, objectBindGroups_[i]);
-
+    if (!prisms.empty()) {
+        pass.SetVertexBuffer(1, prismInstanceBuffer_);
         pass.DrawIndexed(
-            static_cast<uint32_t>(prismMesh_.indices.size())
+            static_cast<uint32_t>(prismMesh_.indices.size()),
+            static_cast<uint32_t>(prisms.size())
         );
     }
 

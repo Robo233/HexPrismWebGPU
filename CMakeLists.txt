@@ -15,6 +15,7 @@ add_executable(HexPrismWebGPU
     src/InputController.cpp
     src/HexGrid.cpp
     src/HexPrismMesh.cpp
+    src/ProceduralTerrain.cpp
     src/WebGpuRenderer.cpp
 )
 

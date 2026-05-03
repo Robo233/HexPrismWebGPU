@@ -20,7 +20,7 @@ void InputController::update(
         handleEvent(window, event, camera, running);
     }
 
-    handleKeyboard(camera, deltaTime, running);
+    handleKeyboard(window, camera, deltaTime, running);
 }
 
 void InputController::handleEvent(
@@ -40,40 +40,37 @@ void InputController::handleEvent(
     }
 
     if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-        if (event.button.button == SDL_BUTTON_RIGHT) {
-            rightMouseDown_ = true;
+        if (
+            event.button.button == SDL_BUTTON_LEFT ||
+            event.button.button == SDL_BUTTON_RIGHT
+        ) {
+            mouseLookEnabled_ = true;
             SDL_SetWindowRelativeMouseMode(window, true);
         }
     }
 
-    if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-        if (event.button.button == SDL_BUTTON_RIGHT) {
-            rightMouseDown_ = false;
-            SDL_SetWindowRelativeMouseMode(window, false);
-        }
-    }
-
-    if (event.type == SDL_EVENT_MOUSE_MOTION && rightMouseDown_) {
+    if (event.type == SDL_EVENT_MOUSE_MOTION && mouseLookEnabled_) {
         constexpr float mouseSensitivity = 0.12f;
         float rollSign = isCameraUpsideDown(camera) ? -1.0f : 1.0f;
 
         float yawDelta =
             event.motion.xrel * mouseSensitivity * rollSign;
         float pitchDelta =
-            -event.motion.yrel * mouseSensitivity * rollSign;
+            -event.motion.yrel * mouseSensitivity;
 
         rotateCamera(camera, yawDelta, pitchDelta);
     }
 }
 
 void InputController::handleKeyboard(
+    SDL_Window* window,
     Camera& camera,
     float deltaTime,
     bool& running
 ) {
     const bool* keys = SDL_GetKeyboardState(nullptr);
 
-    float moveSpeed = 2.2f;
+    float moveSpeed = 15.0f;
     float rotateSpeed = 90.0f;
 
     if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) {
@@ -90,6 +87,11 @@ void InputController::handleKeyboard(
     float rotateAmount = rotateSpeed * deltaTime;
 
     if (keys[SDL_SCANCODE_ESCAPE]) {
+        if (mouseLookEnabled_) {
+            mouseLookEnabled_ = false;
+            SDL_SetWindowRelativeMouseMode(window, false);
+        }
+
         running = false;
     }
 

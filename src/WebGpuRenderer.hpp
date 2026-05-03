@@ -10,6 +10,7 @@
 
 #include <glm/glm.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -21,14 +22,18 @@ public:
 
     void render(
         const std::vector<Prism>& prisms,
-        const Camera& camera
+        const Camera& camera,
+        uint64_t prismRevision = 0
     );
 
 private:
-    struct ObjectUniforms {
-        glm::mat4 mvp;
-        glm::mat4 model;
-        glm::vec4 color;
+    struct FrameUniforms {
+        glm::mat4 viewProjection;
+    };
+
+    struct PrismInstanceData {
+        glm::vec4 positionAndCos;
+        glm::vec4 colorAndSin;
     };
 
     SDL_Window* window_ = nullptr;
@@ -48,12 +53,18 @@ private:
     wgpu::Buffer prismVertexBuffer_;
     wgpu::Buffer prismIndexBuffer_;
 
-    wgpu::BindGroupLayout objectBindGroupLayout_;
+    wgpu::Buffer frameUniformBuffer_;
+    wgpu::BindGroup frameBindGroup_;
+
+    wgpu::Buffer prismInstanceBuffer_;
+    std::size_t prismInstanceCapacity_ = 0;
+    uint64_t uploadedPrismRevision_ = 0;
+    std::size_t uploadedPrismCount_ = 0;
+    std::vector<PrismInstanceData> prismInstanceData_;
+
+    wgpu::BindGroupLayout frameBindGroupLayout_;
     wgpu::PipelineLayout pipelineLayout_;
     wgpu::RenderPipeline pipeline_;
-
-    std::vector<wgpu::Buffer> objectUniformBuffers_;
-    std::vector<wgpu::BindGroup> objectBindGroups_;
 
     bool createInstance();
     bool createSurface();
@@ -66,7 +77,11 @@ private:
 
     bool resizeIfNeeded();
 
-    void ensureObjectUniformCapacity(std::size_t count);
+    void ensurePrismInstanceBufferCapacity(std::size_t count);
+    void updatePrismInstanceBuffer(
+        const std::vector<Prism>& prisms,
+        uint64_t prismRevision
+    );
 
     wgpu::Texture createDepthTextureObject(
         uint32_t width,
@@ -86,5 +101,4 @@ private:
         uint32_t& height
     ) const;
 
-    glm::mat4 createPrismModelMatrix(const Prism& prism) const;
 };

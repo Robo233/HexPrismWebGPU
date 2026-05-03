@@ -14,7 +14,7 @@ public:
     );
 
 private:
-    bool rightMouseDown_ = false;
+    bool mouseLookEnabled_ = false;
 
     void handleEvent(
         SDL_Window* window,
@@ -24,6 +24,7 @@ private:
     );
 
     void handleKeyboard(
+        SDL_Window* window,
         Camera& camera,
         float deltaTime,
         bool& running
