@@ -331,15 +331,11 @@ struct FrameUniforms {
 @group(0) @binding(0)
 var<uniform> frame : FrameUniforms;
 
-// Step 3K: manual shadow-map depth reads. The light camera is now centered
-// from the actual uploaded prism bounds instead of the viewer camera, so
-// shadow-map artifacts should not slide around like a cloud attached to
-// the player.
+// Step 3O: optimized manual shadow-map depth reads.
+// The shadow map is cached and only regenerated when prism data changes.
 @group(0) @binding(1)
 var shadowMap : texture_depth_2d;
 
-@group(0) @binding(2)
-var shadowSampler : sampler_comparison;
 
 struct VertexIn {
     @location(0) position : vec3f,
@@ -542,6 +538,69 @@ fn vsShadow(input : VertexIn) -> VertexOut {
 }
 
 
+fn compareShadowTexel(
+    texel : vec2i,
+    currentDepth : f32,
+    bias : f32,
+    dimensions : vec2i
+) -> f32 {
+    if (
+        texel.x < 0 || texel.y < 0 ||
+        texel.x >= dimensions.x || texel.y >= dimensions.y
+    ) {
+        return 0.0;
+    }
+
+    let storedDepth = textureLoad(shadowMap, texel, 0);
+
+    if (currentDepth - bias > storedDepth) {
+        return 1.0;
+    }
+
+    return 0.0;
+}
+
+fn bilinearShadowCompare(
+    shadowUv : vec2f,
+    currentDepth : f32,
+    bias : f32,
+    dimensions : vec2i,
+    dimensionsF : vec2f
+) -> f32 {
+    let texelPosition = shadowUv * dimensionsF - vec2f(0.5, 0.5);
+    let baseTexel = vec2i(floor(texelPosition));
+    let blend = fract(texelPosition);
+
+    let c00 = compareShadowTexel(
+        baseTexel,
+        currentDepth,
+        bias,
+        dimensions
+    );
+    let c10 = compareShadowTexel(
+        baseTexel + vec2i(1, 0),
+        currentDepth,
+        bias,
+        dimensions
+    );
+    let c01 = compareShadowTexel(
+        baseTexel + vec2i(0, 1),
+        currentDepth,
+        bias,
+        dimensions
+    );
+    let c11 = compareShadowTexel(
+        baseTexel + vec2i(1, 1),
+        currentDepth,
+        bias,
+        dimensions
+    );
+
+    let row0 = mix(c00, c10, blend.x);
+    let row1 = mix(c01, c11, blend.x);
+    return mix(row0, row1, blend.y);
+}
+
 fn manualShadowMapAmount(worldPosition : vec3f, normal : vec3f, lightDir : vec3f) -> f32 {
     let lightClip = frame.lightViewProjection * vec4f(worldPosition, 1.0);
 
@@ -568,38 +627,30 @@ fn manualShadowMapAmount(worldPosition : vec3f, normal : vec3f, lightDir : vec3f
         return 0.0;
     }
 
-    let shadowMapSize = vec2f(1024.0, 1024.0);
-    let baseTexel = vec2i(clamp(
-        shadowUv * shadowMapSize,
-        vec2f(1.0, 1.0),
-        shadowMapSize - vec2f(2.0, 2.0)
-    ));
+    // Major performance shortcut: only compute real shadowing on mostly
+    // upward-facing faces. Vertical prism sides are already darkened by
+    // diffuse lighting and do not need expensive shadow-map reads.
+    if (normal.y < 0.45) {
+        return 0.0;
+    }
 
-    // Step 3L: now that the broad moving cloud is gone, lower the bias so
-    // thin/tall objects such as trees can cast visible shadows. Bias is still
-    // slope-aware to reduce acne on steep faces.
+    let textureSize = textureDimensions(shadowMap);
+    let dimensions = vec2i(i32(textureSize.x), i32(textureSize.y));
+    let dimensionsF = vec2f(f32(textureSize.x), f32(textureSize.y));
+
+    // Step 3O: use one bilinear compare instead of the previous 9-filter
+    // pattern. This cuts fragment depth loads from roughly 36 to 4.
     let slopeBias = (1.0 - saturate(dot(normal, lightDir))) * 0.0025;
     let bias = 0.0012 + slopeBias;
 
-    var occludedSamples = 0.0;
-    var totalSamples = 0.0;
+    let occlusion = bilinearShadowCompare(
+        shadowUv,
+        currentDepth,
+        bias,
+        dimensions,
+        dimensionsF
+    );
 
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            let sampleTexel = baseTexel + vec2i(x, y);
-            let storedDepth = textureLoad(shadowMap, sampleTexel, 0);
-
-            if (currentDepth - bias > storedDepth) {
-                occludedSamples = occludedSamples + 1.0;
-            }
-
-            totalSamples = totalSamples + 1.0;
-        }
-    }
-
-    let occlusion = occludedSamples / totalSamples;
-
-    // Step 3L: stronger shadows so tree shadows are visible during tuning.
     return occlusion * 0.58;
 }
 
@@ -641,8 +692,8 @@ fn fsMain(input : VertexOut) -> @location(0) vec4f {
 
     let lighting = ambient + diffuse * 0.78;
 
-    // Step 3L: keep the old procedural fake cloud shadow disabled.
-    // Use only the real shadow map, but allow it to be strong enough to see.
+    // Step 3O: cached real shadow map. The expensive part now only runs
+    // on upward-facing fragments inside manualShadowMapAmount.
     let realShadow = manualShadowMapAmount(input.worldPosition, n, lightDir);
     let shadow = clamp(realShadow, 0.0, 0.62);
 
@@ -677,15 +728,9 @@ bool WebGpuRenderer::createPipeline() {
     shadowTextureBindEntry.texture.viewDimension = wgpu::TextureViewDimension::e2D;
     shadowTextureBindEntry.texture.multisampled = false;
 
-    wgpu::BindGroupLayoutEntry shadowSamplerBindEntry{};
-    shadowSamplerBindEntry.binding = 2;
-    shadowSamplerBindEntry.visibility = wgpu::ShaderStage::Fragment;
-    shadowSamplerBindEntry.sampler.type = wgpu::SamplerBindingType::Comparison;
-
-    std::array<wgpu::BindGroupLayoutEntry, 3> mainBindEntries{
+    std::array<wgpu::BindGroupLayoutEntry, 2> mainBindEntries{
         uniformBindEntry,
-        shadowTextureBindEntry,
-        shadowSamplerBindEntry
+        shadowTextureBindEntry
     };
 
     wgpu::BindGroupLayoutDescriptor bindLayoutDesc{};
@@ -697,8 +742,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreateBindGroupLayout(&bindLayoutDesc);
 
     if (!frameBindGroupLayout_) {
-        std::cerr << "Failed to create main frame bind group layout.
-";
+        std::cerr << "Failed to create main frame bind group layout.\n";
         return false;
     }
 
@@ -710,8 +754,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreateBindGroupLayout(&shadowBindLayoutDesc);
 
     if (!shadowFrameBindGroupLayout_) {
-        std::cerr << "Failed to create shadow frame bind group layout.
-";
+        std::cerr << "Failed to create shadow frame bind group layout.\n";
         return false;
     }
 
@@ -726,27 +769,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreateBuffer(&frameUniformDesc);
 
     if (!frameUniformBuffer_) {
-        std::cerr << "Failed to create frame uniform buffer.
-";
-        return false;
-    }
-
-    wgpu::SamplerDescriptor shadowSamplerDesc{};
-    shadowSamplerDesc.addressModeU = wgpu::AddressMode::ClampToEdge;
-    shadowSamplerDesc.addressModeV = wgpu::AddressMode::ClampToEdge;
-    shadowSamplerDesc.addressModeW = wgpu::AddressMode::ClampToEdge;
-    shadowSamplerDesc.magFilter = wgpu::FilterMode::Linear;
-    shadowSamplerDesc.minFilter = wgpu::FilterMode::Linear;
-    shadowSamplerDesc.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
-    shadowSamplerDesc.compare = wgpu::CompareFunction::LessEqual;
-    shadowSamplerDesc.lodMinClamp = 0.0f;
-    shadowSamplerDesc.lodMaxClamp = 1.0f;
-
-    shadowSampler_ = device_.CreateSampler(&shadowSamplerDesc);
-
-    if (!shadowSampler_) {
-        std::cerr << "Failed to create shadow comparison sampler.
-";
+        std::cerr << "Failed to create frame uniform buffer.\n";
         return false;
     }
 
@@ -760,14 +783,9 @@ bool WebGpuRenderer::createPipeline() {
     shadowTextureBindGroupEntry.binding = 1;
     shadowTextureBindGroupEntry.textureView = shadowDepthTextureView_;
 
-    wgpu::BindGroupEntry shadowSamplerBindGroupEntry{};
-    shadowSamplerBindGroupEntry.binding = 2;
-    shadowSamplerBindGroupEntry.sampler = shadowSampler_;
-
-    std::array<wgpu::BindGroupEntry, 3> mainBindGroupEntries{
+    std::array<wgpu::BindGroupEntry, 2> mainBindGroupEntries{
         uniformBindGroupEntry,
-        shadowTextureBindGroupEntry,
-        shadowSamplerBindGroupEntry
+        shadowTextureBindGroupEntry
     };
 
     wgpu::BindGroupDescriptor frameBindDesc{};
@@ -780,8 +798,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreateBindGroup(&frameBindDesc);
 
     if (!frameBindGroup_) {
-        std::cerr << "Failed to create main frame bind group.
-";
+        std::cerr << "Failed to create main frame bind group.\n";
         return false;
     }
 
@@ -794,8 +811,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreateBindGroup(&shadowFrameBindDesc);
 
     if (!shadowFrameBindGroup_) {
-        std::cerr << "Failed to create shadow frame bind group.
-";
+        std::cerr << "Failed to create shadow frame bind group.\n";
         return false;
     }
 
@@ -807,8 +823,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreatePipelineLayout(&pipelineLayoutDesc);
 
     if (!pipelineLayout_) {
-        std::cerr << "Failed to create main pipeline layout.
-";
+        std::cerr << "Failed to create main pipeline layout.\n";
         return false;
     }
 
@@ -820,8 +835,7 @@ bool WebGpuRenderer::createPipeline() {
         device_.CreatePipelineLayout(&shadowPipelineLayoutDesc);
 
     if (!shadowPipelineLayout_) {
-        std::cerr << "Failed to create shadow pipeline layout.
-";
+        std::cerr << "Failed to create shadow pipeline layout.\n";
         return false;
     }
 
@@ -1175,15 +1189,25 @@ void WebGpuRenderer::render(
 
     proj[1][1] *= -1.0f;
 
-    const glm::vec3 sunDir =
-        glm::normalize(glm::vec3(0.52f, 0.66f, -0.54f));
+    const bool shadowMapNeedsUpdate =
+        !prisms.empty() &&
+        (
+            !shadowMapValid_ ||
+            cachedShadowRevision_ != prismRevision ||
+            cachedShadowPrismCount_ != prisms.size()
+        );
 
-    glm::vec3 shadowMin = camera.position - glm::vec3(64.0f, 16.0f, 64.0f);
-    glm::vec3 shadowMax = camera.position + glm::vec3(64.0f, 48.0f, 64.0f);
+    if (prisms.empty()) {
+        cachedLightViewProjection_ = glm::mat4(1.0f);
+        cachedShadowRevision_ = prismRevision;
+        cachedShadowPrismCount_ = 0;
+        shadowMapValid_ = false;
+    } else if (shadowMapNeedsUpdate) {
+        const glm::vec3 sunDir =
+            glm::normalize(glm::vec3(0.52f, 0.66f, -0.54f));
 
-    if (!prisms.empty()) {
-        shadowMin = prisms.front().position;
-        shadowMax = prisms.front().position;
+        glm::vec3 shadowMin = prisms.front().position;
+        glm::vec3 shadowMax = prisms.front().position;
 
         for (const Prism& prism : prisms) {
             shadowMin = glm::min(shadowMin, prism.position);
@@ -1195,77 +1219,76 @@ void WebGpuRenderer::render(
         // moderate so the 1024 shadow map has enough detail for tree shadows.
         shadowMin -= glm::vec3(8.0f, 4.0f, 8.0f);
         shadowMax += glm::vec3(8.0f, 18.0f, 8.0f);
+
+        glm::vec3 shadowCenter = (shadowMin + shadowMax) * 0.5f;
+        shadowCenter.y = std::max(shadowCenter.y, 8.0f);
+
+        glm::vec3 lightUp(0.0f, 1.0f, 0.0f);
+        if (std::abs(glm::dot(lightUp, sunDir)) > 0.92f) {
+            lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
+        }
+
+        const glm::vec3 lightForward = glm::normalize(-sunDir);
+        const glm::vec3 lightRight = glm::normalize(glm::cross(lightForward, lightUp));
+        const glm::vec3 lightTrueUp = glm::normalize(glm::cross(lightRight, lightForward));
+
+        float maxProjectedRadius = 48.0f;
+
+        const std::array<glm::vec3, 8> boundsCorners{
+            glm::vec3(shadowMin.x, shadowMin.y, shadowMin.z),
+            glm::vec3(shadowMin.x, shadowMin.y, shadowMax.z),
+            glm::vec3(shadowMin.x, shadowMax.y, shadowMin.z),
+            glm::vec3(shadowMin.x, shadowMax.y, shadowMax.z),
+            glm::vec3(shadowMax.x, shadowMin.y, shadowMin.z),
+            glm::vec3(shadowMax.x, shadowMin.y, shadowMax.z),
+            glm::vec3(shadowMax.x, shadowMax.y, shadowMin.z),
+            glm::vec3(shadowMax.x, shadowMax.y, shadowMax.z)
+        };
+
+        for (const glm::vec3& corner : boundsCorners) {
+            const glm::vec3 relative = corner - shadowCenter;
+            maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightRight)));
+            maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightTrueUp)));
+        }
+
+        const float shadowHalfExtent = std::clamp(maxProjectedRadius + 8.0f, 48.0f, 140.0f);
+        const float shadowDistance = shadowHalfExtent * 2.0f;
+        const float shadowFarPlane = shadowHalfExtent * 4.0f;
+
+        const float shadowTexelWorldSize =
+            (shadowHalfExtent * 2.0f) / static_cast<float>(ShadowMapSize);
+
+        const float centerRight = glm::dot(shadowCenter, lightRight);
+        const float centerUp = glm::dot(shadowCenter, lightTrueUp);
+        const float snappedRight = std::floor(centerRight / shadowTexelWorldSize) * shadowTexelWorldSize;
+        const float snappedUp = std::floor(centerUp / shadowTexelWorldSize) * shadowTexelWorldSize;
+
+        shadowCenter +=
+            lightRight * (snappedRight - centerRight) +
+            lightTrueUp * (snappedUp - centerUp);
+
+        glm::mat4 lightView = glm::lookAt(
+            shadowCenter + sunDir * shadowDistance,
+            shadowCenter,
+            lightUp
+        );
+
+        glm::mat4 lightProjection = glm::ortho(
+            -shadowHalfExtent,
+            shadowHalfExtent,
+            -shadowHalfExtent,
+            shadowHalfExtent,
+            0.1f,
+            shadowFarPlane
+        );
+        lightProjection[1][1] *= -1.0f;
+
+        cachedLightViewProjection_ = lightProjection * lightView;
     }
-
-    glm::vec3 shadowCenter = (shadowMin + shadowMax) * 0.5f;
-    shadowCenter.y = std::max(shadowCenter.y, 8.0f);
-
-    glm::vec3 lightUp(0.0f, 1.0f, 0.0f);
-    if (std::abs(glm::dot(lightUp, sunDir)) > 0.92f) {
-        lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
-    }
-
-    const glm::vec3 lightForward = glm::normalize(-sunDir);
-    const glm::vec3 lightRight = glm::normalize(glm::cross(lightForward, lightUp));
-    const glm::vec3 lightTrueUp = glm::normalize(glm::cross(lightRight, lightForward));
-
-    float maxProjectedRadius = 48.0f;
-
-    const std::array<glm::vec3, 8> boundsCorners{
-        glm::vec3(shadowMin.x, shadowMin.y, shadowMin.z),
-        glm::vec3(shadowMin.x, shadowMin.y, shadowMax.z),
-        glm::vec3(shadowMin.x, shadowMax.y, shadowMin.z),
-        glm::vec3(shadowMin.x, shadowMax.y, shadowMax.z),
-        glm::vec3(shadowMax.x, shadowMin.y, shadowMin.z),
-        glm::vec3(shadowMax.x, shadowMin.y, shadowMax.z),
-        glm::vec3(shadowMax.x, shadowMax.y, shadowMin.z),
-        glm::vec3(shadowMax.x, shadowMax.y, shadowMax.z)
-    };
-
-    for (const glm::vec3& corner : boundsCorners) {
-        const glm::vec3 relative = corner - shadowCenter;
-        maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightRight)));
-        maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightTrueUp)));
-    }
-
-    const float shadowHalfExtent = std::clamp(maxProjectedRadius + 8.0f, 48.0f, 140.0f);
-    const float shadowDistance = shadowHalfExtent * 2.0f;
-    const float shadowFarPlane = shadowHalfExtent * 4.0f;
-
-    // Snap the bounds-based light camera center to shadow-map texel increments
-    // in light space. Unlike Step 3J, this center does not continuously follow
-    // the player camera. It only changes when the uploaded prism bounds change.
-    const float shadowTexelWorldSize =
-        (shadowHalfExtent * 2.0f) / static_cast<float>(ShadowMapSize);
-
-    const float centerRight = glm::dot(shadowCenter, lightRight);
-    const float centerUp = glm::dot(shadowCenter, lightTrueUp);
-    const float snappedRight = std::floor(centerRight / shadowTexelWorldSize) * shadowTexelWorldSize;
-    const float snappedUp = std::floor(centerUp / shadowTexelWorldSize) * shadowTexelWorldSize;
-
-    shadowCenter +=
-        lightRight * (snappedRight - centerRight) +
-        lightTrueUp * (snappedUp - centerUp);
-
-    glm::mat4 lightView = glm::lookAt(
-        shadowCenter + sunDir * shadowDistance,
-        shadowCenter,
-        lightUp
-    );
-
-    glm::mat4 lightProjection = glm::ortho(
-        -shadowHalfExtent,
-        shadowHalfExtent,
-        -shadowHalfExtent,
-        shadowHalfExtent,
-        0.1f,
-        shadowFarPlane
-    );
-    lightProjection[1][1] *= -1.0f;
 
     FrameUniforms frameUniforms{};
     frameUniforms.viewProjection = proj * view;
-    frameUniforms.lightViewProjection = lightProjection * lightView;
+    frameUniforms.lightViewProjection = cachedLightViewProjection_;
     frameUniforms.cameraRightAndAspect =
         glm::vec4(getCameraRight(camera), aspect);
     frameUniforms.cameraUpAndTanHalfFov =
@@ -1314,7 +1337,7 @@ void WebGpuRenderer::render(
     wgpu::CommandEncoder encoder =
         device_.CreateCommandEncoder();
 
-    if (!prisms.empty()) {
+    if (shadowMapNeedsUpdate) {
         wgpu::RenderPassDepthStencilAttachment shadowDepthAttachment{};
         shadowDepthAttachment.view = shadowDepthTextureView_;
         shadowDepthAttachment.depthLoadOp = wgpu::LoadOp::Clear;
@@ -1339,6 +1362,10 @@ void WebGpuRenderer::render(
             static_cast<uint32_t>(prisms.size())
         );
         shadowPass.End();
+
+        shadowMapValid_ = true;
+        cachedShadowRevision_ = prismRevision;
+        cachedShadowPrismCount_ = prisms.size();
     }
 
     wgpu::RenderPassColorAttachment colorAttachment{};

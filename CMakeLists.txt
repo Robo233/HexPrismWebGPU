@@ -16,7 +16,7 @@ add_executable(HexPrismWebGPU
     src/HexGrid.cpp
     src/HexPrismMesh.cpp
     src/ProceduralTerrain.cpp
-    src/WebGpuRenderer.cpp
+    src/WebGpuRenderer2.cpp
 )
 
 target_link_libraries(HexPrismWebGPU
@@ -31,3 +31,7 @@ target_compile_definitions(HexPrismWebGPU
         NOMINMAX
         GLM_FORCE_DEPTH_ZERO_TO_ONE
 )
+
+if (MSVC)
+    target_compile_options(HexPrismWebGPU PRIVATE /FS)
+endif()
