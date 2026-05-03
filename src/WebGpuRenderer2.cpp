@@ -342,7 +342,7 @@ struct VertexIn {
     @location(1) normal : vec3f,
     @location(2) positionAndCos : vec4f,
     @location(3) colorAndSin : vec4f,
-    @location(4) alphaAndPadding : vec4f,
+    @location(4) alpha : f32,
 };
 
 struct VertexOut {
@@ -404,7 +404,7 @@ fn fbm(p : vec2f) -> f32 {
     var total = 0.0;
     var normalization = 0.0;
 
-    for (var i = 0; i < 5; i = i + 1) {
+    for (var i = 0; i < 3; i = i + 1) {
         total = total + valueNoise(q) * amplitude;
         normalization = normalization + amplitude;
         q = q * 2.03 + vec2f(17.2, 11.7);
@@ -492,17 +492,17 @@ fn vsMain(input : VertexIn) -> VertexOut {
         -uprightPosition.x * s + uprightPosition.z * c
     );
 
-    let rotatedNormal = normalize(vec3f(
+    let rotatedNormal = vec3f(
         uprightNormal.x * c + uprightNormal.z * s,
         uprightNormal.y,
         -uprightNormal.x * s + uprightNormal.z * c
-    ));
+    );
 
     let worldPosition = rotatedPosition + input.positionAndCos.xyz;
 
     out.position = frame.viewProjection * vec4f(worldPosition, 1.0);
     out.normal = rotatedNormal;
-    out.color = vec4f(input.colorAndSin.rgb, input.alphaAndPadding.x);
+    out.color = vec4f(input.colorAndSin.rgb, input.alpha);
     out.worldPosition = worldPosition;
 
     return out;
@@ -541,16 +541,8 @@ fn vsShadow(input : VertexIn) -> VertexOut {
 fn compareShadowTexel(
     texel : vec2i,
     currentDepth : f32,
-    bias : f32,
-    dimensions : vec2i
+    bias : f32
 ) -> f32 {
-    if (
-        texel.x < 0 || texel.y < 0 ||
-        texel.x >= dimensions.x || texel.y >= dimensions.y
-    ) {
-        return 0.0;
-    }
-
     let storedDepth = textureLoad(shadowMap, texel, 0);
 
     if (currentDepth - bias > storedDepth) {
@@ -563,37 +555,36 @@ fn compareShadowTexel(
 fn bilinearShadowCompare(
     shadowUv : vec2f,
     currentDepth : f32,
-    bias : f32,
-    dimensions : vec2i,
-    dimensionsF : vec2f
+    bias : f32
 ) -> f32 {
-    let texelPosition = shadowUv * dimensionsF - vec2f(0.5, 0.5);
+    let shadowMapSize = vec2f(1024.0, 1024.0);
+    let texelPosition = clamp(
+        shadowUv * shadowMapSize - vec2f(0.5, 0.5),
+        vec2f(0.0, 0.0),
+        shadowMapSize - vec2f(2.0, 2.0)
+    );
     let baseTexel = vec2i(floor(texelPosition));
     let blend = fract(texelPosition);
 
     let c00 = compareShadowTexel(
         baseTexel,
         currentDepth,
-        bias,
-        dimensions
+        bias
     );
     let c10 = compareShadowTexel(
         baseTexel + vec2i(1, 0),
         currentDepth,
-        bias,
-        dimensions
+        bias
     );
     let c01 = compareShadowTexel(
         baseTexel + vec2i(0, 1),
         currentDepth,
-        bias,
-        dimensions
+        bias
     );
     let c11 = compareShadowTexel(
         baseTexel + vec2i(1, 1),
         currentDepth,
-        bias,
-        dimensions
+        bias
     );
 
     let row0 = mix(c00, c10, blend.x);
@@ -634,10 +625,6 @@ fn manualShadowMapAmount(worldPosition : vec3f, normal : vec3f, lightDir : vec3f
         return 0.0;
     }
 
-    let textureSize = textureDimensions(shadowMap);
-    let dimensions = vec2i(i32(textureSize.x), i32(textureSize.y));
-    let dimensionsF = vec2f(f32(textureSize.x), f32(textureSize.y));
-
     // Step 3O: use one bilinear compare instead of the previous 9-filter
     // pattern. This cuts fragment depth loads from roughly 36 to 4.
     let slopeBias = (1.0 - saturate(dot(normal, lightDir))) * 0.0025;
@@ -646,9 +633,7 @@ fn manualShadowMapAmount(worldPosition : vec3f, normal : vec3f, lightDir : vec3f
     let occlusion = bilinearShadowCompare(
         shadowUv,
         currentDepth,
-        bias,
-        dimensions,
-        dimensionsF
+        bias
     );
 
     return occlusion * 0.58;
@@ -675,7 +660,7 @@ fn softShadowAmount(
 
 @fragment
 fn fsMain(input : VertexOut) -> @location(0) vec4f {
-    let n = normalize(input.normal);
+    let n = input.normal;
     let isWater = input.color.a < 0.999;
 
     if (isWater) {
@@ -872,8 +857,8 @@ bool WebGpuRenderer::createPipeline() {
 
     instanceAttributes[2].shaderLocation = 4;
     instanceAttributes[2].offset =
-        offsetof(PrismInstanceData, alphaAndPadding);
-    instanceAttributes[2].format = wgpu::VertexFormat::Float32x4;
+        offsetof(PrismInstanceData, alpha);
+    instanceAttributes[2].format = wgpu::VertexFormat::Float32;
 
     vertexLayouts[1].arrayStride = sizeof(PrismInstanceData);
     vertexLayouts[1].stepMode = wgpu::VertexStepMode::Instance;
@@ -1134,12 +1119,7 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
                 prisms[i].color,
                 rotationSin[static_cast<std::size_t>(step)]
             ),
-            glm::vec4(
-                std::clamp(prisms[i].alpha, 0.0f, 1.0f),
-                0.0f,
-                0.0f,
-                0.0f
-            )
+            std::clamp(prisms[i].alpha, 0.0f, 1.0f)
         };
     }
 
@@ -1166,15 +1146,18 @@ void WebGpuRenderer::render(
     }
 
     glm::vec3 forward = getCameraForward(camera);
+    glm::vec3 cameraUp = getCameraUp(camera);
+    glm::vec3 cameraRight = glm::normalize(glm::cross(forward, cameraUp));
 
     glm::mat4 view =
         glm::lookAt(
             camera.position,
             camera.position + forward,
-            getCameraUp(camera)
+            cameraUp
         );
 
     constexpr float verticalFovDegrees = 45.0f;
+    constexpr float cameraFarClipDistance = 500.0f;
     float aspect =
         static_cast<float>(surfaceConfig_.width) /
         static_cast<float>(surfaceConfig_.height);
@@ -1184,7 +1167,7 @@ void WebGpuRenderer::render(
             glm::radians(verticalFovDegrees),
             aspect,
             0.1f,
-            100.0f
+            cameraFarClipDistance
         );
 
     proj[1][1] *= -1.0f;
@@ -1290,10 +1273,10 @@ void WebGpuRenderer::render(
     frameUniforms.viewProjection = proj * view;
     frameUniforms.lightViewProjection = cachedLightViewProjection_;
     frameUniforms.cameraRightAndAspect =
-        glm::vec4(getCameraRight(camera), aspect);
+        glm::vec4(cameraRight, aspect);
     frameUniforms.cameraUpAndTanHalfFov =
         glm::vec4(
-            getCameraUp(camera),
+            cameraUp,
             std::tan(glm::radians(verticalFovDegrees) * 0.5f)
         );
     frameUniforms.cameraForwardAndTime =
@@ -1310,6 +1293,17 @@ void WebGpuRenderer::render(
     );
 
     updatePrismInstanceBuffer(prisms, prismRevision);
+
+    std::size_t shadowCasterCount = prisms.size();
+
+    if (shadowMapNeedsUpdate) {
+        while (
+            shadowCasterCount > 0 &&
+            prisms[shadowCasterCount - 1].alpha < 0.999f
+        ) {
+            --shadowCasterCount;
+        }
+    }
 
     wgpu::SurfaceTexture surfaceTexture{};
     surface_.GetCurrentTexture(&surfaceTexture);
@@ -1337,7 +1331,7 @@ void WebGpuRenderer::render(
     wgpu::CommandEncoder encoder =
         device_.CreateCommandEncoder();
 
-    if (shadowMapNeedsUpdate) {
+    if (shadowMapNeedsUpdate && shadowCasterCount > 0) {
         wgpu::RenderPassDepthStencilAttachment shadowDepthAttachment{};
         shadowDepthAttachment.view = shadowDepthTextureView_;
         shadowDepthAttachment.depthLoadOp = wgpu::LoadOp::Clear;
@@ -1359,7 +1353,7 @@ void WebGpuRenderer::render(
         shadowPass.SetIndexBuffer(prismIndexBuffer_, wgpu::IndexFormat::Uint16);
         shadowPass.DrawIndexed(
             static_cast<uint32_t>(prismMesh_.indices.size()),
-            static_cast<uint32_t>(prisms.size())
+            static_cast<uint32_t>(shadowCasterCount)
         );
         shadowPass.End();
 

@@ -29,7 +29,9 @@ int main(int argc, char** argv) {
         "WebGPU Hexagonal Prism Voxel Test",
         1280,
         720,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
+        SDL_WINDOW_RESIZABLE |
+SDL_WINDOW_HIGH_PIXEL_DENSITY |
+SDL_WINDOW_MAXIMIZED
     );
 
     if (window == nullptr) {

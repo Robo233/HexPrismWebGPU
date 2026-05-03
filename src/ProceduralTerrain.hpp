@@ -9,8 +9,8 @@
 
 struct ProceduralTerrainSettings {
     int seed = 6564;
-    int renderRadius = 250;
-    int rebuildStride = 4;
+    int renderRadius = 400;
+    int rebuildStride = 16;
     int minTerrainHeight = 1;
     int maxTerrainHeight = 256;
 };

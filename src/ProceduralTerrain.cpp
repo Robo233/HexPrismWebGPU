@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -14,6 +16,12 @@ int hexDistanceFromOrigin(int q, int r) {
         std::max(std::abs(q), std::abs(r)),
         std::abs(s)
     );
+}
+
+int fastFloor(float value) {
+    int truncated = static_cast<int>(value);
+
+    return truncated - static_cast<int>(value < static_cast<float>(truncated));
 }
 
 uint32_t hashCoordinates(int q, int r, int seed) {
@@ -73,8 +81,8 @@ float lerp(float a, float b, float t) {
 }
 
 float valueNoise2D(float x, float y, int seed) {
-    int x0 = static_cast<int>(std::floor(x));
-    int y0 = static_cast<int>(std::floor(y));
+    int x0 = fastFloor(x);
+    int y0 = fastFloor(y);
     int x1 = x0 + 1;
     int y1 = y0 + 1;
 
@@ -169,6 +177,164 @@ struct TerrainSample {
     float grassVariation = 0.0f;
     float rock = 0.0f;
 };
+
+struct HexOffset {
+    int dq = 0;
+    int dr = 0;
+};
+
+std::size_t hexCellCountForRadius(int radius) {
+    return
+        1u +
+        static_cast<std::size_t>(3 * radius * (radius + 1));
+}
+
+const std::vector<HexOffset>& hexOffsetsWithinRadius(int radius) {
+    static std::unordered_map<int, std::vector<HexOffset>> offsetsByRadius;
+
+    auto cached = offsetsByRadius.find(radius);
+
+    if (cached != offsetsByRadius.end()) {
+        return cached->second;
+    }
+
+    std::vector<HexOffset> offsets;
+    offsets.reserve(hexCellCountForRadius(radius));
+
+    for (int dq = -radius; dq <= radius; ++dq) {
+        for (int dr = -radius; dr <= radius; ++dr) {
+            if (hexDistanceFromOrigin(dq, dr) <= radius) {
+                offsets.push_back(HexOffset{ dq, dr });
+            }
+        }
+    }
+
+    auto inserted =
+        offsetsByRadius.emplace(radius, std::move(offsets));
+
+    return inserted.first->second;
+}
+
+uint64_t coordinateKey(int q, int r) {
+    return
+        (static_cast<uint64_t>(static_cast<uint32_t>(q)) << 32u) |
+        static_cast<uint32_t>(r);
+}
+
+struct CachedTerrainSample {
+    int q = 0;
+    int r = 0;
+    TerrainSample terrain;
+};
+
+struct TerrainSampleCache {
+    int seed = 0;
+    int minTerrainHeight = 0;
+    int maxTerrainHeight = 0;
+    bool initialized = false;
+    std::unordered_map<uint64_t, CachedTerrainSample> samples;
+};
+
+TerrainSampleCache& terrainSampleCache() {
+    static TerrainSampleCache cache;
+
+    return cache;
+}
+
+void resetTerrainSampleCacheIfNeeded(
+    TerrainSampleCache& cache,
+    const ProceduralTerrainSettings& settings
+) {
+    if (
+        cache.initialized &&
+        cache.seed == settings.seed &&
+        cache.minTerrainHeight == settings.minTerrainHeight &&
+        cache.maxTerrainHeight == settings.maxTerrainHeight
+    ) {
+        return;
+    }
+
+    cache.seed = settings.seed;
+    cache.minTerrainHeight = settings.minTerrainHeight;
+    cache.maxTerrainHeight = settings.maxTerrainHeight;
+    cache.initialized = true;
+    cache.samples.clear();
+}
+
+void pruneTerrainSampleCache(
+    TerrainSampleCache& cache,
+    HexCell center,
+    int retentionRadius,
+    std::size_t pruneThreshold
+) {
+    if (cache.samples.size() <= pruneThreshold) {
+        return;
+    }
+
+    for (auto it = cache.samples.begin(); it != cache.samples.end();) {
+        const CachedTerrainSample& entry = it->second;
+
+        if (
+            hexDistanceFromOrigin(
+                entry.q - center.q,
+                entry.r - center.r
+            ) > retentionRadius
+        ) {
+            it = cache.samples.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+template <typename Func>
+void parallelFor(std::size_t count, Func&& func) {
+    constexpr std::size_t minParallelItems = 2048;
+
+    if (count < minParallelItems) {
+        func(0, count);
+        return;
+    }
+
+    unsigned int hardwareThreads = std::thread::hardware_concurrency();
+    unsigned int workerCount =
+        hardwareThreads > 1u ? hardwareThreads - 1u : 1u;
+    workerCount = std::clamp(workerCount, 1u, 8u);
+    workerCount =
+        std::min<unsigned int>(
+            workerCount,
+            static_cast<unsigned int>(count)
+        );
+
+    if (workerCount <= 1u) {
+        func(0, count);
+        return;
+    }
+
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+
+    std::size_t chunkSize =
+        (count + static_cast<std::size_t>(workerCount) - 1u) /
+        static_cast<std::size_t>(workerCount);
+
+    for (unsigned int worker = 0; worker < workerCount; ++worker) {
+        std::size_t begin = static_cast<std::size_t>(worker) * chunkSize;
+        std::size_t end = std::min(count, begin + chunkSize);
+
+        if (begin >= end) {
+            break;
+        }
+
+        workers.emplace_back([&, begin, end]() {
+            func(begin, end);
+        });
+    }
+
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+}
 
 TerrainSample sampleTerrain(
     int q,
@@ -852,9 +1018,10 @@ void createProceduralPrisms(
         return &terrainSamples[terrainIndex(dq, dr)];
     };
 
-    std::size_t visibleTerrainCellCount =
-        1u +
-        static_cast<std::size_t>(3 * renderRadius * (renderRadius + 1));
+    const std::vector<HexOffset>& visibleOffsets =
+        hexOffsetsWithinRadius(renderRadius);
+    std::size_t visibleTerrainCellCount = visibleOffsets.size();
+
     std::size_t estimatedPrismCount =
         visibleTerrainCellCount *
         static_cast<std::size_t>(std::min(settings.maxTerrainHeight, 18)) +
@@ -867,19 +1034,65 @@ void createProceduralPrisms(
     constexpr int neighborQ[6] = { 1, 1, 0, -1, -1, 0 };
     constexpr int neighborR[6] = { 0, -1, -1, 0, 1, 1 };
 
-    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
-        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
-            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
-                continue;
-            }
+    TerrainSampleCache& cache = terrainSampleCache();
+    resetTerrainSampleCacheIfNeeded(cache, settings);
 
-            int q = center.q + dq;
-            int r = center.r + dr;
+    if (cache.samples.bucket_count() < visibleTerrainCellCount * 2u) {
+        cache.samples.reserve(visibleTerrainCellCount * 2u);
+    }
 
-            terrainSamples[terrainIndex(dq, dr)] =
-                sampleTerrain(q, r, settings);
+    std::vector<HexOffset> missingTerrainOffsets;
+    missingTerrainOffsets.reserve(visibleTerrainCellCount / 8u);
+
+    for (const HexOffset& offset : visibleOffsets) {
+        int q = center.q + offset.dq;
+        int r = center.r + offset.dr;
+        auto cached = cache.samples.find(coordinateKey(q, r));
+
+        if (cached != cache.samples.end()) {
+            terrainSamples[terrainIndex(offset.dq, offset.dr)] =
+                cached->second.terrain;
+        } else {
+            missingTerrainOffsets.push_back(offset);
         }
     }
+
+    parallelFor(
+        missingTerrainOffsets.size(),
+        [&](std::size_t begin, std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) {
+                const HexOffset& offset = missingTerrainOffsets[i];
+                int q = center.q + offset.dq;
+                int r = center.r + offset.dr;
+
+                terrainSamples[terrainIndex(offset.dq, offset.dr)] =
+                    sampleTerrain(q, r, settings);
+            }
+        }
+    );
+
+    for (const HexOffset& offset : missingTerrainOffsets) {
+        int q = center.q + offset.dq;
+        int r = center.r + offset.dr;
+
+        cache.samples.emplace(
+            coordinateKey(q, r),
+            CachedTerrainSample{
+                q,
+                r,
+                terrainSamples[terrainIndex(offset.dq, offset.dr)]
+            }
+        );
+    }
+
+    int cacheRetentionRadius =
+        renderRadius + std::max(settings.rebuildStride * 4, 64);
+    pruneTerrainSampleCache(
+        cache,
+        center,
+        cacheRetentionRadius,
+        visibleTerrainCellCount * 3u
+    );
 
     constexpr float waterBedThreshold = 0.45f;
 
@@ -1314,8 +1527,12 @@ void createProceduralPrisms(
         }
     };
 
-    std::vector<HexCell> treeCells;
-    treeCells.reserve(visibleTerrainCellCount / 8u);
+    std::unordered_map<uint64_t, int> treeDistanceByCell;
+    treeDistanceByCell.reserve(visibleTerrainCellCount / 8u);
+
+    constexpr int maxTreeSpacingDistance = 4;
+    const std::vector<HexOffset>& treeSpacingOffsets =
+        hexOffsetsWithinRadius(maxTreeSpacingDistance - 1);
 
     auto minimumTreeDistanceForTerrain = [
         &settings
@@ -1334,26 +1551,26 @@ void createProceduralPrisms(
     };
 
     auto canPlaceTreeWithSpacing = [
-        &settings,
-        &treeCells,
-        &terrainAt,
-        &minimumTreeDistanceForTerrain
-    ](int q, int r, const TerrainSample& terrain) {
-        HexCell candidate{ q, r, 0 };
-        int requiredDistance = minimumTreeDistanceForTerrain(terrain);
+        &treeDistanceByCell,
+        &treeSpacingOffsets
+    ](int q, int r, int requiredDistance) {
+        for (const HexOffset& offset : treeSpacingOffsets) {
+            auto existingTree =
+                treeDistanceByCell.find(
+                    coordinateKey(q + offset.dq, r + offset.dr)
+                );
 
-        for (const HexCell& existingTree : treeCells) {
-            const TerrainSample* existingTerrain =
-                terrainAt(existingTree.q, existingTree.r);
-            int existingRequiredDistance = existingTerrain == nullptr
-                ? requiredDistance
-                : minimumTreeDistanceForTerrain(*existingTerrain);
+            if (existingTree == treeDistanceByCell.end()) {
+                continue;
+            }
+
+            int existingRequiredDistance = existingTree->second;
             int distance = std::max(
                 2,
                 std::min(requiredDistance, existingRequiredDistance)
             );
 
-            if (hexDistanceBetweenCells(candidate, existingTree) < distance) {
+            if (hexDistanceFromOrigin(offset.dq, offset.dr) < distance) {
                 return false;
             }
         }
@@ -1421,12 +1638,17 @@ void createProceduralPrisms(
                 addTerrainLayer(terrainHeight - 1);
             }
 
-            if (
-                shouldPlaceTree(q, r, *terrain, settings) &&
-                canPlaceTreeWithSpacing(q, r, *terrain)
-            ) {
-                treeCells.push_back(HexCell{ q, r, 0 });
-                addTree(q, r, terrainHeight - 1);
+            if (shouldPlaceTree(q, r, *terrain, settings)) {
+                int requiredTreeDistance =
+                    minimumTreeDistanceForTerrain(*terrain);
+
+                if (canPlaceTreeWithSpacing(q, r, requiredTreeDistance)) {
+                    treeDistanceByCell.emplace(
+                        coordinateKey(q, r),
+                        requiredTreeDistance
+                    );
+                    addTree(q, r, terrainHeight - 1);
+                }
             }
         }
     }

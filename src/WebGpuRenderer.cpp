@@ -346,7 +346,7 @@ struct VertexIn {
     @location(1) normal : vec3f,
     @location(2) positionAndCos : vec4f,
     @location(3) colorAndSin : vec4f,
-    @location(4) alphaAndPadding : vec4f,
+    @location(4) alpha : f32,
 };
 
 struct VertexOut {
@@ -506,7 +506,7 @@ fn vsMain(input : VertexIn) -> VertexOut {
 
     out.position = frame.viewProjection * vec4f(worldPosition, 1.0);
     out.normal = rotatedNormal;
-    out.color = vec4f(input.colorAndSin.rgb, input.alphaAndPadding.x);
+    out.color = vec4f(input.colorAndSin.rgb, input.alpha);
     out.worldPosition = worldPosition;
 
     return out;
@@ -858,8 +858,8 @@ bool WebGpuRenderer::createPipeline() {
 
     instanceAttributes[2].shaderLocation = 4;
     instanceAttributes[2].offset =
-        offsetof(PrismInstanceData, alphaAndPadding);
-    instanceAttributes[2].format = wgpu::VertexFormat::Float32x4;
+        offsetof(PrismInstanceData, alpha);
+    instanceAttributes[2].format = wgpu::VertexFormat::Float32;
 
     vertexLayouts[1].arrayStride = sizeof(PrismInstanceData);
     vertexLayouts[1].stepMode = wgpu::VertexStepMode::Instance;
@@ -1120,12 +1120,7 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
                 prisms[i].color,
                 rotationSin[static_cast<std::size_t>(step)]
             ),
-            glm::vec4(
-                std::clamp(prisms[i].alpha, 0.0f, 1.0f),
-                0.0f,
-                0.0f,
-                0.0f
-            )
+            std::clamp(prisms[i].alpha, 0.0f, 1.0f)
         };
     }
 
