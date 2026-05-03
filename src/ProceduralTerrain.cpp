@@ -137,13 +137,37 @@ glm::vec2 axialToTerrainPoint(int q, int r) {
     );
 }
 
+float normalizedTerrainHeight(
+    int height,
+    const ProceduralTerrainSettings& settings
+) {
+    float heightRange =
+        static_cast<float>(
+            settings.maxTerrainHeight - settings.minTerrainHeight
+        );
+
+    return static_cast<float>(height - settings.minTerrainHeight) /
+        std::max(1.0f, heightRange);
+}
+
+float rockStrengthForHeight(float heightT) {
+    return smoothstep(0.78f, 0.91f, heightT);
+}
+
 struct TerrainSample {
     int height = 0;
     float river = 0.0f;
     float riverBank = 0.0f;
+    float sea = 0.0f;
+    float seaBank = 0.0f;
+    float lake = 0.0f;
+    float lakeBank = 0.0f;
+    float water = 0.0f;
+    float waterBank = 0.0f;
     float sand = 0.0f;
     float moisture = 0.0f;
     float grassVariation = 0.0f;
+    float rock = 0.0f;
 };
 
 TerrainSample sampleTerrain(
@@ -155,50 +179,50 @@ TerrainSample sampleTerrain(
     glm::vec2 warp(
         (
             fbmNoise(
-                p.x * 0.011f,
-                p.y * 0.011f,
+                p.x * 0.0095f,
+                p.y * 0.0095f,
                 settings.seed + 101,
                 4
             ) - 0.5f
-        ) * 34.0f,
+        ) * 40.0f,
         (
             fbmNoise(
-                p.x * 0.011f,
-                p.y * 0.011f,
+                p.x * 0.0095f,
+                p.y * 0.0095f,
                 settings.seed + 151,
                 4
             ) - 0.5f
-        ) * 34.0f
+        ) * 40.0f
     );
 
     glm::vec2 w = p + warp;
 
     float broad =
         fbmNoise(
-            w.x * 0.0045f,
-            w.y * 0.0045f,
+            w.x * 0.0038f,
+            w.y * 0.0038f,
             settings.seed + 11,
             5
         );
     float rolling =
         fbmNoise(
-            w.x * 0.018f,
-            w.y * 0.018f,
+            w.x * 0.0145f,
+            w.y * 0.0145f,
             settings.seed + 43,
             5
         );
     float fine =
         fbmNoise(
-            w.x * 0.065f,
-            w.y * 0.065f,
+            w.x * 0.052f,
+            w.y * 0.052f,
             settings.seed + 97,
             3
         );
     float ridge =
         ridgedNoise(
             fbmNoise(
-                w.x * 0.024f,
-                w.y * 0.024f,
+                w.x * 0.0062f,
+                w.y * 0.0062f,
                 settings.seed + 311,
                 4
             )
@@ -207,8 +231,8 @@ TerrainSample sampleTerrain(
     float riverField =
         ridgedNoise(
             fbmNoise(
-                (p.x + warp.x * 0.45f) * 0.013f,
-                (p.y + warp.y * 0.45f) * 0.013f,
+                (p.x + warp.x * 0.42f) * 0.0110f,
+                (p.y + warp.y * 0.42f) * 0.0110f,
                 settings.seed + 709,
                 5
             )
@@ -218,8 +242,8 @@ TerrainSample sampleTerrain(
             0.38f,
             0.74f,
             fbmNoise(
-                w.x * 0.005f,
-                w.y * 0.005f,
+                w.x * 0.0045f,
+                w.y * 0.0045f,
                 settings.seed + 727,
                 3
             )
@@ -228,6 +252,51 @@ TerrainSample sampleTerrain(
         smoothstep(0.905f, 0.985f, riverField) * riverRegion;
     float riverBank =
         smoothstep(0.74f, 0.92f, riverField) * riverRegion;
+
+    float seaShape =
+        fbmNoise(
+            (w.x + warp.x * 0.18f) * 0.0023f,
+            (w.y + warp.y * 0.18f) * 0.0023f,
+            settings.seed + 8081,
+            5
+        );
+    float seaCoastDetail =
+        fbmNoise(
+            w.x * 0.0085f,
+            w.y * 0.0085f,
+            settings.seed + 8093,
+            3
+        );
+    float seaField = seaShape * 0.89f + seaCoastDetail * 0.11f;
+    float sea = smoothstep(0.565f, 0.735f, seaField);
+    float seaBank = smoothstep(0.455f, 0.635f, seaField);
+
+    float lakeRegion =
+        smoothstep(
+            0.50f,
+            0.82f,
+            fbmNoise(
+                (w.x - 91.0f) * 0.0052f,
+                (w.y + 37.0f) * 0.0052f,
+                settings.seed + 8123,
+                4
+            )
+        );
+    float lakeShape =
+        fbmNoise(
+            (w.x + 19.0f) * 0.0145f,
+            (w.y - 53.0f) * 0.0145f,
+            settings.seed + 8153,
+            4
+        );
+    float largeLake =
+        smoothstep(0.710f, 0.875f, lakeShape) * lakeRegion;
+    float lakeBank =
+        smoothstep(0.550f, 0.745f, lakeShape) * lakeRegion;
+
+    float water = std::max(river, std::max(sea, largeLake));
+    float waterBank =
+        std::max(riverBank, std::max(seaBank, lakeBank));
 
     float heightRange =
         static_cast<float>(
@@ -238,40 +307,91 @@ TerrainSample sampleTerrain(
             0.24f,
             0.82f,
             fbmNoise(
-                w.x * 0.0075f,
-                w.y * 0.0075f,
+                w.x * 0.0062f,
+                w.y * 0.0062f,
                 settings.seed + 271,
                 4
             )
         );
-    float rollingHills = smoothstep(0.22f, 0.90f, rolling);
-    float ridgeHills = smoothstep(0.38f, 0.94f, ridge);
+    float continent = smoothstep(0.28f, 0.84f, broad);
+    float rollingHills =
+        smoothstep(0.50f, 0.90f, rolling) *
+        smoothstep(0.24f, 0.84f, broad);
+    float ridgeHills = smoothstep(0.58f, 0.94f, ridge);
+    float mountainRegion =
+        smoothstep(0.50f, 0.88f, broad) *
+        smoothstep(0.48f, 0.86f, hillMask);
+    float mountainLift =
+        smoothstep(0.66f, 0.94f, ridge) *
+        mountainRegion;
     float elevation01 =
-        0.06f +
-        broad * 0.22f +
-        rollingHills * (0.34f + hillMask * 0.22f) +
-        ridgeHills * 0.13f +
-        (fine - 0.5f) * 0.08f;
+        0.175f +
+        continent * 0.125f +
+        (rolling - 0.5f) * 0.075f +
+        rollingHills * 0.105f +
+        ridgeHills * mountainRegion * 0.055f +
+        mountainLift * 0.390f +
+        (fine - 0.5f) * 0.025f;
+
+    float bankLowering =
+        riverBank * 0.08f +
+        lakeBank * 0.06f +
+        seaBank * 0.015f;
+    float bedLowering =
+        river * 0.24f +
+        largeLake * 0.42f +
+        sea * 0.98f;
 
     elevation01 =
         std::clamp(
-            elevation01 -
-                riverBank * 0.08f -
-                river * 0.22f,
+            elevation01 - bankLowering - bedLowering,
             0.0f,
             1.0f
+        );
+
+    float lowlandFlatness =
+        1.0f - smoothstep(0.24f, 0.48f, elevation01);
+    float lowlandStep = 2.0f / std::max(1.0f, heightRange);
+    float terracedLowland =
+        std::round(elevation01 / lowlandStep) * lowlandStep;
+
+    elevation01 =
+        lerp(
+            elevation01,
+            terracedLowland,
+            lowlandFlatness * 0.55f
         );
 
     float height =
         static_cast<float>(settings.minTerrainHeight) +
         elevation01 * heightRange;
 
-    if (river > 0.45f) {
+    if (sea > 0.34f) {
+        float deepSea = smoothstep(0.34f, 0.78f, sea);
+        float seaFloor01 = lerp(0.04f, -0.02f, deepSea);
+
         height =
             std::min(
                 height,
                 static_cast<float>(settings.minTerrainHeight) +
-                    heightRange * (0.10f - river * 0.035f)
+                    heightRange * seaFloor01
+            );
+    } else if (largeLake > 0.45f) {
+        float deepLake = smoothstep(0.45f, 0.88f, largeLake);
+        float lakeFloor01 = lerp(0.14f, 0.02f, deepLake);
+
+        height =
+            std::min(
+                height,
+                static_cast<float>(settings.minTerrainHeight) +
+                    heightRange * lakeFloor01
+            );
+    } else if (river > 0.45f) {
+        height =
+            std::min(
+                height,
+                static_cast<float>(settings.minTerrainHeight) +
+                    heightRange * (0.12f - river * 0.055f)
             );
     }
 
@@ -282,24 +402,67 @@ TerrainSample sampleTerrain(
             settings.maxTerrainHeight
         );
 
+    float normalizedHeight = normalizedTerrainHeight(roundedHeight, settings);
+    float lowCoastMask =
+        1.0f - smoothstep(0.18f, 0.34f, normalizedHeight);
+
+    float riverSand =
+        river * 0.95f +
+        riverBank * 0.30f;
+    float seaBedSand =
+        sea > 0.38f
+            ? smoothstep(0.38f, 0.70f, sea) * 0.98f
+            : 0.0f;
+    float lakeBedSand =
+        largeLake > 0.45f
+            ? smoothstep(0.45f, 0.78f, largeLake) * 0.90f
+            : 0.0f;
+    float seaBeachHint =
+        smoothstep(0.50f, 0.68f, seaBank) *
+        lowCoastMask *
+        (1.0f - smoothstep(0.30f, 0.62f, sea)) *
+        0.46f;
+    float lakeBeachHint =
+        smoothstep(0.58f, 0.74f, lakeBank) *
+        (1.0f - smoothstep(0.14f, 0.26f, normalizedHeight)) *
+        (1.0f - smoothstep(0.34f, 0.70f, largeLake)) *
+        0.18f;
+
     TerrainSample terrain{};
     terrain.height = roundedHeight;
     terrain.river = river;
     terrain.riverBank = std::max(riverBank, river);
+    terrain.sea = sea;
+    terrain.seaBank = std::max(seaBank, sea);
+    terrain.lake = largeLake;
+    terrain.lakeBank = std::max(lakeBank, largeLake);
+    terrain.water = water;
+    terrain.waterBank = std::max(waterBank, water);
+    terrain.sand =
+        std::clamp(
+            riverSand +
+                seaBedSand +
+                lakeBedSand +
+                seaBeachHint +
+                lakeBeachHint,
+            0.0f,
+            1.0f
+        );
     terrain.moisture =
         fbmNoise(
-            (p.x - 23.0f) * 0.018f,
-            (p.y + 41.0f) * 0.018f,
+            (p.x - 23.0f) * 0.0140f,
+            (p.y + 41.0f) * 0.0140f,
             settings.seed + 503,
             4
         );
     terrain.grassVariation =
         fbmNoise(
-            (p.x + 17.0f) * 0.075f,
-            (p.y - 29.0f) * 0.075f,
+            (p.x + 17.0f) * 0.060f,
+            (p.y - 29.0f) * 0.060f,
             settings.seed + 607,
             3
         );
+    terrain.rock = rockStrengthForHeight(normalizedHeight);
 
     return terrain;
 }
@@ -310,11 +473,7 @@ glm::vec3 topColorForTerrain(
     const TerrainSample& terrain,
     const ProceduralTerrainSettings& settings
 ) {
-    float heightT =
-        static_cast<float>(terrain.height - settings.minTerrainHeight) /
-        static_cast<float>(
-            settings.maxTerrainHeight - settings.minTerrainHeight
-        );
+    float heightT = normalizedTerrainHeight(terrain.height, settings);
     float localVariation =
         (
             terrain.grassVariation +
@@ -331,8 +490,14 @@ glm::vec3 topColorForTerrain(
 
     glm::vec3 shadedGrass(0.11f, 0.34f, 0.16f);
     glm::vec3 meadowGrass(0.21f, 0.53f, 0.22f);
-    glm::vec3 hillGrass(0.32f, 0.61f, 0.27f);
+    glm::vec3 hillGrass(0.28f, 0.55f, 0.24f);
+    glm::vec3 forestFloor(0.07f, 0.24f, 0.09f);
     glm::vec3 dampGrass(0.13f, 0.43f, 0.25f);
+
+    float forestBand =
+        smoothstep(0.18f, 0.54f, heightT) *
+        (1.0f - smoothstep(0.64f, 0.76f, heightT));
+    float grassAmount = 1.0f - terrain.rock;
 
     glm::vec3 base =
         mixColor(shadedGrass, meadowGrass, localVariation);
@@ -340,14 +505,82 @@ glm::vec3 topColorForTerrain(
         mixColor(
             base,
             dampGrass,
-            smoothstep(0.58f, 0.88f, terrain.moisture)
+            smoothstep(0.58f, 0.88f, terrain.moisture) * grassAmount
+        );
+    base =
+        mixColor(
+            base,
+            hillGrass,
+            smoothstep(0.30f, 0.62f, heightT) * 0.45f * grassAmount
+        );
+    base = mixColor(base, forestFloor, forestBand * 0.28f * grassAmount);
+
+    float rockVariation =
+        (
+            random01(q, r, settings.seed + 1703) * 0.45f +
+            fbmNoise(
+                static_cast<float>(q) * 0.09f,
+                static_cast<float>(r) * 0.09f,
+                settings.seed + 1711,
+                3
+            ) * 0.55f
+        );
+    glm::vec3 darkRock(0.23f, 0.24f, 0.23f);
+    glm::vec3 lightRock(0.47f, 0.48f, 0.45f);
+    glm::vec3 mountainRock = mixColor(darkRock, lightRock, rockVariation);
+
+    return mixColor(base, mountainRock, terrain.rock);
+}
+
+glm::vec3 dirtColorForLayer(
+    int q,
+    int r,
+    int layer,
+    const ProceduralTerrainSettings& settings
+) {
+    float layerVariation =
+        random01(q, r, settings.seed + 1409) * 0.45f +
+        random01(q, layer, settings.seed + 1423) * 0.35f +
+        random01(r, layer, settings.seed + 1439) * 0.20f;
+    float stratum =
+        (wrappedRotationStep(q, r, layer, settings.seed + 1471) % 4 == 0)
+            ? 1.0f
+            : 0.0f;
+
+    glm::vec3 darkDirt(0.20f, 0.13f, 0.07f);
+    glm::vec3 midDirt(0.36f, 0.24f, 0.13f);
+    glm::vec3 dryDirt(0.48f, 0.34f, 0.19f);
+
+    glm::vec3 dirt = mixColor(darkDirt, midDirt, layerVariation);
+
+    return mixColor(dirt, dryDirt, stratum * 0.18f);
+}
+
+glm::vec3 rockColorForLayer(
+    int q,
+    int r,
+    int layer,
+    const ProceduralTerrainSettings& settings
+) {
+    float layerT =
+        static_cast<float>(layer) /
+        static_cast<float>(settings.maxTerrainHeight);
+    float strata =
+        (wrappedRotationStep(q, r, layer, 0) % 3 == 0) ? 1.0f : 0.0f;
+
+    glm::vec3 lowerRock(0.12f, 0.14f, 0.15f);
+    glm::vec3 upperRock(0.24f, 0.29f, 0.22f);
+    glm::vec3 stratumRock(0.20f, 0.25f, 0.20f);
+    glm::vec3 mountainRock(0.36f, 0.37f, 0.35f);
+
+    glm::vec3 rock =
+        mixColor(
+            mixColor(lowerRock, upperRock, layerT),
+            stratumRock,
+            strata * 0.25f
         );
 
-    return mixColor(
-        base,
-        hillGrass,
-        smoothstep(0.35f, 1.0f, heightT) * 0.55f
-    );
+    return mixColor(rock, mountainRock, smoothstep(0.70f, 0.95f, layerT));
 }
 
 glm::vec3 colorForLayer(
@@ -361,21 +594,107 @@ glm::vec3 colorForLayer(
         return topColorForTerrain(q, r, terrain, settings);
     }
 
-    float layerT =
-        static_cast<float>(layer) /
-        static_cast<float>(settings.maxTerrainHeight);
-    float strata =
-        (wrappedRotationStep(q, r, layer, 0) % 3 == 0) ? 1.0f : 0.0f;
+    glm::vec3 dirt = dirtColorForLayer(q, r, layer, settings);
+    glm::vec3 rock = rockColorForLayer(q, r, layer, settings);
 
-    glm::vec3 lowerRock(0.12f, 0.14f, 0.15f);
-    glm::vec3 upperRock(0.24f, 0.29f, 0.22f);
-    glm::vec3 stratumRock(0.20f, 0.25f, 0.20f);
+    return mixColor(dirt, rock, terrain.rock);
+}
 
-    return mixColor(
-        mixColor(lowerRock, upperRock, layerT),
-        stratumRock,
-        strata * 0.25f
+float forestBiomeStrength(
+    int q,
+    int r,
+    const ProceduralTerrainSettings& settings
+) {
+    glm::vec2 p = axialToTerrainPoint(q, r);
+
+    float broadForest =
+        fbmNoise(
+            p.x * 0.0140f,
+            p.y * 0.0140f,
+            settings.seed + 2027,
+            4
+        );
+    float forestEdgeVariation =
+        fbmNoise(
+            p.x * 0.040f,
+            p.y * 0.040f,
+            settings.seed + 2069,
+            3
+        );
+    float groveVariation =
+        fbmNoise(
+            p.x * 0.085f,
+            p.y * 0.085f,
+            settings.seed + 2089,
+            3
+        );
+
+    return smoothstep(
+        0.38f,
+        0.64f,
+        broadForest * 0.78f +
+            forestEdgeVariation * 0.16f +
+            groveVariation * 0.06f
     );
+}
+
+bool shouldPlaceTree(
+    int q,
+    int r,
+    const TerrainSample& terrain,
+    const ProceduralTerrainSettings& settings
+) {
+    if (terrain.height <= settings.minTerrainHeight + 1) {
+        return false;
+    }
+
+    if (
+        terrain.water > 0.35f ||
+        terrain.sand > 0.20f ||
+        terrain.waterBank > 0.46f ||
+        terrain.rock > 0.12f
+    ) {
+        return false;
+    }
+
+    float heightT = normalizedTerrainHeight(terrain.height, settings);
+
+    float biomeStrength = forestBiomeStrength(q, r, settings);
+    float smallPatchNoise =
+        fbmNoise(
+            static_cast<float>(q) * 0.130f,
+            static_cast<float>(r) * 0.130f,
+            settings.seed + 2141,
+            4
+        );
+
+    float scatteredPatchMask = smoothstep(0.50f, 0.78f, smallPatchNoise);
+    float moistureMask = smoothstep(0.30f, 0.76f, terrain.moisture);
+    float altitudeBoost = smoothstep(0.07f, 0.48f, heightT);
+    float highForestFade = 1.0f - smoothstep(0.60f, 0.74f, heightT);
+    float beachTreePenalty = smoothstep(0.03f, 0.17f, heightT);
+    float alpineLimit = altitudeBoost * highForestFade;
+    float forestDensityBoost = 0.72f + altitudeBoost * 0.55f;
+
+    float scatteredChance =
+        scatteredPatchMask *
+        moistureMask *
+        alpineLimit *
+        beachTreePenalty *
+        forestDensityBoost *
+        0.30f;
+    float forestChance =
+        biomeStrength *
+        moistureMask *
+        alpineLimit *
+        beachTreePenalty *
+        forestDensityBoost *
+        1.08f;
+    float placementChance = std::max(scatteredChance, forestChance);
+
+    return
+        placementChance > 0.018f &&
+        random01(q, r, settings.seed + 3001) < placementChance;
 }
 
 HexCell worldToNearestHexCell(
@@ -402,6 +721,52 @@ HexCell worldToNearestHexCell(
     }
 
     return HexCell{ q, r, 0 };
+}
+
+int seaLevelLayerForSettings(
+    const ProceduralTerrainSettings& settings
+) {
+    float heightRange =
+        static_cast<float>(
+            settings.maxTerrainHeight - settings.minTerrainHeight
+        );
+
+    return std::clamp(
+        static_cast<int>(
+            std::round(
+                static_cast<float>(settings.minTerrainHeight) +
+                    heightRange * 0.16f
+            )
+        ),
+        settings.minTerrainHeight,
+        settings.maxTerrainHeight
+    );
+}
+
+glm::vec3 waterColorForTerrain(
+    int q,
+    int r,
+    const TerrainSample& terrain,
+    const ProceduralTerrainSettings& settings
+) {
+    float localVariation =
+        fbmNoise(
+            static_cast<float>(q) * 0.11f,
+            static_cast<float>(r) * 0.11f,
+            settings.seed + 9109,
+            3
+        );
+    float depthHint =
+        std::clamp(terrain.water * 0.82f + terrain.sea * 0.18f, 0.0f, 1.0f);
+
+    glm::vec3 shallowWater(0.16f, 0.58f, 0.76f);
+    glm::vec3 deepWater(0.02f, 0.20f, 0.48f);
+
+    return mixColor(
+        mixColor(shallowWater, deepWater, depthHint),
+        glm::vec3(0.34f, 0.78f, 0.88f),
+        localVariation * 0.12f
+    );
 }
 
 int roundToStride(int value, int stride) {
@@ -492,7 +857,8 @@ void createProceduralPrisms(
         static_cast<std::size_t>(3 * renderRadius * (renderRadius + 1));
     std::size_t estimatedPrismCount =
         visibleTerrainCellCount *
-        static_cast<std::size_t>(std::min(settings.maxTerrainHeight, 10));
+        static_cast<std::size_t>(std::min(settings.maxTerrainHeight, 18)) +
+        visibleTerrainCellCount * 5u;
 
     if (prisms.capacity() < estimatedPrismCount) {
         prisms.reserve(estimatedPrismCount);
@@ -515,7 +881,9 @@ void createProceduralPrisms(
         }
     }
 
-    constexpr float riverBedThreshold = 0.45f;
+    constexpr float waterBedThreshold = 0.45f;
+
+    int seaLevelLayer = seaLevelLayerForSettings(settings);
 
     for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
         for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
@@ -528,53 +896,229 @@ void createProceduralPrisms(
             TerrainSample& terrain =
                 terrainSamples[terrainIndex(dq, dr)];
 
-            if (terrain.river > riverBedThreshold) {
-                terrain.sand = 1.0f;
-                continue;
-            }
-
-            float strongestAdjacentWater = 0.0f;
-            int closestBedHeight = settings.maxTerrainHeight;
+            float strongestAdjacentSea = terrain.sea;
+            float strongestAdjacentInlandWater =
+                std::max(terrain.river, terrain.lake);
+            float strongestAdjacentAnyWater = terrain.water;
+            int closestSeaBedHeight = terrain.height;
+            int closestInlandBedHeight = terrain.height;
 
             for (int i = 0; i < 6; ++i) {
                 const TerrainSample* neighbor =
                     terrainAt(q + neighborQ[i], r + neighborR[i]);
 
-                if (
-                    neighbor == nullptr ||
-                    neighbor->river <= riverBedThreshold
-                ) {
+                if (neighbor == nullptr) {
                     continue;
                 }
 
-                strongestAdjacentWater =
-                    std::max(strongestAdjacentWater, neighbor->river);
-                closestBedHeight =
-                    std::min(closestBedHeight, neighbor->height);
+                strongestAdjacentAnyWater =
+                    std::max(strongestAdjacentAnyWater, neighbor->water);
+
+                if (neighbor->sea > waterBedThreshold) {
+                    strongestAdjacentSea =
+                        std::max(strongestAdjacentSea, neighbor->sea);
+                    closestSeaBedHeight =
+                        std::min(closestSeaBedHeight, neighbor->height);
+                }
+
+                float inlandWater = std::max(neighbor->river, neighbor->lake);
+
+                if (inlandWater > waterBedThreshold) {
+                    strongestAdjacentInlandWater =
+                        std::max(strongestAdjacentInlandWater, inlandWater);
+                    closestInlandBedHeight =
+                        std::min(closestInlandBedHeight, neighbor->height);
+                }
             }
 
-            if (strongestAdjacentWater <= 0.0f) {
+            float normalizedHeight = normalizedTerrainHeight(terrain.height, settings);
+
+            if (strongestAdjacentSea > 0.0f) {
+                int heightAboveSeaBed = terrain.height - closestSeaBedHeight;
+                bool lowCoastalBeach =
+                    heightAboveSeaBed >= 0 &&
+                    heightAboveSeaBed <= 3 &&
+                    terrain.height <= seaLevelLayer + 3;
+                bool slightlyRaisedCoast =
+                    heightAboveSeaBed == 4 &&
+                    terrain.height <= seaLevelLayer + 3 &&
+                    terrain.seaBank > 0.58f &&
+                    normalizedHeight < 0.26f;
+
+                if (lowCoastalBeach || slightlyRaisedCoast) {
+                    float beachStrength =
+                        std::clamp(
+                            0.58f +
+                                strongestAdjacentSea * 0.28f +
+                                terrain.seaBank * 0.22f -
+                                normalizedHeight * 0.18f,
+                            0.0f,
+                            1.0f
+                        );
+                    terrain.sand = std::max(terrain.sand, beachStrength);
+                }
+            }
+
+            if (strongestAdjacentInlandWater > 0.0f) {
+                int heightAboveBed = terrain.height - closestInlandBedHeight;
+                bool lowShore =
+                    heightAboveBed >= -1 &&
+                    heightAboveBed <= 1 &&
+                    terrain.height <= seaLevelLayer + 2;
+                bool occasionalUpperBeach =
+                    heightAboveBed == 2 &&
+                    terrain.height <= seaLevelLayer + 2 &&
+                    terrain.waterBank > 0.55f &&
+                    random01(q, r, settings.seed + 1231) > 0.55f;
+
+                if (lowShore || occasionalUpperBeach) {
+                    terrain.sand =
+                        std::max(
+                            terrain.sand,
+                            std::clamp(
+                                0.45f +
+                                    strongestAdjacentInlandWater * 0.35f +
+                                    terrain.waterBank * 0.20f,
+                                0.0f,
+                                1.0f
+                            )
+                        );
+                }
+            }
+
+            bool atOrBelowSeaLevel = terrain.height <= seaLevelLayer;
+            bool immediateCoast = terrain.height <= seaLevelLayer + 1;
+            bool connectedToWater =
+                strongestAdjacentAnyWater > 0.08f ||
+                terrain.waterBank > 0.18f ||
+                strongestAdjacentSea > 0.08f ||
+                strongestAdjacentInlandWater > 0.12f;
+
+            if (atOrBelowSeaLevel) {
+                terrain.sand = 1.0f;
+
+                if (connectedToWater) {
+                    float shorelineWaterStrength =
+                        std::clamp(
+                            std::max(
+                                std::max(terrain.water, strongestAdjacentAnyWater * 0.96f),
+                                std::max(
+                                    strongestAdjacentSea * 0.98f,
+                                    strongestAdjacentInlandWater * 0.96f
+                                )
+                            ),
+                            0.0f,
+                            1.0f
+                        );
+
+                    terrain.water = std::max(
+                        terrain.water,
+                        std::max(shorelineWaterStrength, 0.55f)
+                    );
+                    terrain.waterBank = std::max(terrain.waterBank, terrain.water);
+
+                    if (strongestAdjacentSea >= strongestAdjacentInlandWater) {
+                        terrain.sea = std::max(
+                            terrain.sea,
+                            std::max(strongestAdjacentSea * 0.95f, 0.55f)
+                        );
+                        terrain.seaBank = std::max(terrain.seaBank, terrain.sea);
+                    } else if (terrain.lake >= terrain.river) {
+                        terrain.lake = std::max(
+                            terrain.lake,
+                            std::max(strongestAdjacentInlandWater * 0.93f, 0.55f)
+                        );
+                        terrain.lakeBank = std::max(terrain.lakeBank, terrain.lake);
+                    } else {
+                        terrain.river = std::max(
+                            terrain.river,
+                            std::max(strongestAdjacentInlandWater * 0.93f, 0.55f)
+                        );
+                        terrain.riverBank = std::max(terrain.riverBank, terrain.river);
+                    }
+                }
+            } else if (immediateCoast && connectedToWater) {
+                terrain.sand = std::max(terrain.sand, 1.0f);
+            }
+        }
+    }
+
+    constexpr int maxBeachDistanceFromWater = 2;
+    constexpr int maxBeachHeightAboveSeaLevel = 3;
+    constexpr float visibleWaterThreshold = 0.05f;
+
+    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
+        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
+            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
                 continue;
             }
 
-            int heightAboveBed = terrain.height - closestBedHeight;
-            bool lowShore =
-                heightAboveBed >= -1 &&
-                heightAboveBed <= 1;
-            bool occasionalUpperBeach =
-                heightAboveBed == 2 &&
-                terrain.riverBank > 0.55f &&
-                random01(q, r, settings.seed + 1231) > 0.55f;
+            int q = center.q + dq;
+            int r = center.r + dr;
+            TerrainSample& terrain =
+                terrainSamples[terrainIndex(dq, dr)];
 
-            if (lowShore || occasionalUpperBeach) {
-                terrain.sand =
-                    std::clamp(
-                        0.45f +
-                            strongestAdjacentWater * 0.35f +
-                            terrain.riverBank * 0.20f,
-                        0.0f,
-                        1.0f
-                    );
+            bool isWaterCell =
+                terrain.height <= seaLevelLayer &&
+                terrain.water > visibleWaterThreshold;
+
+            if (isWaterCell) {
+                terrain.sand = 1.0f;
+                terrain.rock = 0.0f;
+                continue;
+            }
+
+            bool closeToWater = false;
+
+            for (
+                int nearDq = -maxBeachDistanceFromWater;
+                nearDq <= maxBeachDistanceFromWater && !closeToWater;
+                ++nearDq
+            ) {
+                for (
+                    int nearDr = -maxBeachDistanceFromWater;
+                    nearDr <= maxBeachDistanceFromWater;
+                    ++nearDr
+                ) {
+                    if (
+                        hexDistanceFromOrigin(nearDq, nearDr) >
+                        maxBeachDistanceFromWater
+                    ) {
+                        continue;
+                    }
+
+                    const TerrainSample* nearbyTerrain =
+                        terrainAt(q + nearDq, r + nearDr);
+
+                    if (nearbyTerrain == nullptr) {
+                        continue;
+                    }
+
+                    bool nearbyWaterCell =
+                        nearbyTerrain->height <= seaLevelLayer &&
+                        nearbyTerrain->water > visibleWaterThreshold;
+
+                    if (nearbyWaterCell) {
+                        closeToWater = true;
+                        break;
+                    }
+                }
+            }
+
+            bool lowEnoughForBeach =
+                terrain.height <= seaLevelLayer + maxBeachHeightAboveSeaLevel;
+
+            if (!closeToWater || !lowEnoughForBeach) {
+                terrain.sand = 0.0f;
+            } else if (terrain.height > seaLevelLayer + 1) {
+                float fade =
+                    1.0f -
+                    static_cast<float>(terrain.height - seaLevelLayer - 1) /
+                    static_cast<float>(maxBeachHeightAboveSeaLevel);
+                terrain.sand = std::min(
+                    terrain.sand,
+                    std::clamp(fade, 0.0f, 1.0f)
+                );
             }
         }
     }
@@ -589,7 +1133,8 @@ void createProceduralPrisms(
         int r,
         int layer,
         int rotationStep,
-        glm::vec3 color
+        glm::vec3 color,
+        float alpha = 1.0f
     ) {
         prisms.emplace_back(
             glm::vec3(
@@ -602,8 +1147,218 @@ void createProceduralPrisms(
                     )
             ),
             rotationStep,
-            color
+            color,
+            alpha
         );
+    };
+
+    auto addTree = [&](int q, int r, int groundLayer) {
+        float heightT = normalizedTerrainHeight(groundLayer + 1, settings);
+        float elevationSizeBoost = smoothstep(0.14f, 0.56f, heightT);
+        float highAltitudeShrink = smoothstep(0.54f, 0.70f, heightT);
+        float sizeRoll = random01(q, r, settings.seed + 4001);
+        float shapeRoll = random01(q, r, settings.seed + 4007);
+        float branchRoll = random01(q, r, settings.seed + 4017);
+        float crownRoll = random01(q, r, settings.seed + 4023);
+
+        int trunkHeight = 4;
+        int canopyRadius = 1;
+        int canopyLayers = 2;
+
+        if (sizeRoll < 0.13f - elevationSizeBoost * 0.05f + highAltitudeShrink * 0.14f) {
+            trunkHeight = 3 + (shapeRoll > 0.60f ? 1 : 0);
+            canopyLayers = 1 + (branchRoll > 0.72f ? 1 : 0);
+        } else if (sizeRoll > 0.86f - elevationSizeBoost * 0.24f) {
+            trunkHeight = 7 + (branchRoll > 0.48f ? 1 : 0);
+            canopyLayers = 3 + (crownRoll > 0.58f ? 1 : 0);
+            canopyRadius = 2;
+        } else if (sizeRoll > 0.62f - elevationSizeBoost * 0.16f) {
+            trunkHeight = 6;
+            canopyLayers = 3;
+            canopyRadius = branchRoll > 0.34f ? 2 : 1;
+        } else if (shapeRoll > 0.48f - elevationSizeBoost * 0.10f) {
+            trunkHeight = 5;
+            canopyLayers = branchRoll > 0.38f ? 3 : 2;
+        }
+
+        if (highAltitudeShrink > 0.0f) {
+            trunkHeight = std::max(
+                3,
+                trunkHeight - static_cast<int>(std::round(highAltitudeShrink * 2.0f))
+            );
+            canopyLayers = std::max(
+                1,
+                canopyLayers - static_cast<int>(std::round(highAltitudeShrink))
+            );
+        }
+
+        int baseLayer = groundLayer + 1;
+
+        glm::vec3 trunkColor =
+            mixColor(
+                glm::vec3(0.18f, 0.10f, 0.05f),
+                glm::vec3(0.40f, 0.25f, 0.11f),
+                random01(q, r, settings.seed + 4011)
+            );
+        glm::vec3 leafColor =
+            mixColor(
+                glm::vec3(0.04f, 0.19f, 0.07f),
+                glm::vec3(0.15f, 0.47f, 0.14f),
+                random01(q, r, settings.seed + 4021)
+            );
+        glm::vec3 leafHighlight =
+            mixColor(
+                leafColor,
+                glm::vec3(0.24f, 0.55f, 0.18f),
+                0.25f + random01(q, r, settings.seed + 4027) * 0.20f
+            );
+        glm::vec3 leafShadow =
+            mixColor(
+                leafColor,
+                glm::vec3(0.02f, 0.11f, 0.04f),
+                0.22f
+            );
+
+        for (int i = 0; i < trunkHeight; ++i) {
+            addPrism(
+                q,
+                r,
+                baseLayer + i,
+                wrappedRotationStep(q, r, baseLayer + i, settings.seed + 31),
+                trunkColor
+            );
+        }
+
+        int canopyBase = baseLayer + trunkHeight;
+        int canopyRotation =
+            wrappedRotationStep(q, r, canopyBase, settings.seed + 57);
+
+        auto addCanopyBlock = [&, q, r](
+            int dq,
+            int dr,
+            int layer,
+            int rotationStep,
+            glm::vec3 color
+        ) {
+            addPrism(
+                q + dq,
+                r + dr,
+                layer,
+                rotationStep,
+                color
+            );
+        };
+
+        addPrism(q, r, canopyBase, canopyRotation, leafColor);
+
+        if (canopyRadius >= 1) {
+            addCanopyBlock(1, 0, canopyBase, canopyRotation + 2, leafShadow);
+            addCanopyBlock(-1, 0, canopyBase, canopyRotation + 3, leafColor);
+            addCanopyBlock(0, 1, canopyBase, canopyRotation + 4, leafColor);
+            addCanopyBlock(0, -1, canopyBase, canopyRotation + 5, leafShadow);
+        }
+
+        if (canopyRadius >= 2) {
+            addCanopyBlock(1, -1, canopyBase, canopyRotation + 1, leafColor);
+            addCanopyBlock(-1, 1, canopyBase, canopyRotation + 2, leafShadow);
+            addCanopyBlock(1, 1, canopyBase, canopyRotation + 3, leafColor);
+            addCanopyBlock(-1, -1, canopyBase, canopyRotation + 4, leafShadow);
+
+            if (crownRoll > 0.64f) {
+                addCanopyBlock(2, 0, canopyBase, canopyRotation + 2, leafShadow);
+            }
+            if (crownRoll < 0.36f) {
+                addCanopyBlock(-2, 0, canopyBase, canopyRotation + 3, leafColor);
+            }
+            if (branchRoll > 0.66f) {
+                addCanopyBlock(0, 2, canopyBase, canopyRotation + 4, leafColor);
+            }
+            if (branchRoll < 0.34f) {
+                addCanopyBlock(0, -2, canopyBase, canopyRotation + 5, leafShadow);
+            }
+        }
+
+        if (canopyLayers >= 2) {
+            addPrism(q, r, canopyBase + 1, canopyRotation + 1, leafHighlight);
+
+            if (shapeRoll > 0.35f) {
+                addCanopyBlock(1, 0, canopyBase + 1, canopyRotation + 2, leafColor);
+                addCanopyBlock(-1, 0, canopyBase + 1, canopyRotation + 3, leafColor);
+
+                if (canopyRadius >= 2 && branchRoll > 0.52f) {
+                    addCanopyBlock(1, -1, canopyBase + 1, canopyRotation + 4, leafShadow);
+                }
+            } else {
+                addCanopyBlock(0, 1, canopyBase + 1, canopyRotation + 4, leafColor);
+                addCanopyBlock(0, -1, canopyBase + 1, canopyRotation + 5, leafColor);
+
+                if (canopyRadius >= 2 && branchRoll < 0.48f) {
+                    addCanopyBlock(-1, 1, canopyBase + 1, canopyRotation + 2, leafShadow);
+                }
+            }
+        }
+
+        if (canopyLayers >= 3) {
+            addPrism(q, r, canopyBase + 2, canopyRotation + 2, leafHighlight);
+
+            if (canopyRadius >= 2 && crownRoll > 0.42f) {
+                addCanopyBlock(1, 0, canopyBase + 2, canopyRotation + 3, leafHighlight);
+            }
+            if (canopyRadius >= 2 && crownRoll < 0.58f) {
+                addCanopyBlock(-1, 0, canopyBase + 2, canopyRotation + 4, leafColor);
+            }
+        }
+
+        if (canopyLayers >= 4) {
+            addPrism(q, r, canopyBase + 3, canopyRotation + 3, leafHighlight);
+        }
+    };
+
+    std::vector<HexCell> treeCells;
+    treeCells.reserve(visibleTerrainCellCount / 8u);
+
+    auto minimumTreeDistanceForTerrain = [
+        &settings
+    ](const TerrainSample& terrain) {
+        float heightT = normalizedTerrainHeight(terrain.height, settings);
+
+        if (heightT < 0.16f) {
+            return 4;
+        }
+
+        if (heightT < 0.46f) {
+            return 3;
+        }
+
+        return 2;
+    };
+
+    auto canPlaceTreeWithSpacing = [
+        &settings,
+        &treeCells,
+        &terrainAt,
+        &minimumTreeDistanceForTerrain
+    ](int q, int r, const TerrainSample& terrain) {
+        HexCell candidate{ q, r, 0 };
+        int requiredDistance = minimumTreeDistanceForTerrain(terrain);
+
+        for (const HexCell& existingTree : treeCells) {
+            const TerrainSample* existingTerrain =
+                terrainAt(existingTree.q, existingTree.r);
+            int existingRequiredDistance = existingTerrain == nullptr
+                ? requiredDistance
+                : minimumTreeDistanceForTerrain(*existingTerrain);
+            int distance = std::max(
+                2,
+                std::min(requiredDistance, existingRequiredDistance)
+            );
+
+            if (hexDistanceBetweenCells(candidate, existingTree) < distance) {
+                return false;
+            }
+        }
+
+        return true;
     };
 
     for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
@@ -665,6 +1420,49 @@ void createProceduralPrisms(
 
                 addTerrainLayer(terrainHeight - 1);
             }
+
+            if (
+                shouldPlaceTree(q, r, *terrain, settings) &&
+                canPlaceTreeWithSpacing(q, r, *terrain)
+            ) {
+                treeCells.push_back(HexCell{ q, r, 0 });
+                addTree(q, r, terrainHeight - 1);
+            }
+        }
+    }
+
+    constexpr float waterAlpha = 0.58f;
+
+    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
+        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
+            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
+                continue;
+            }
+
+            int q = center.q + dq;
+            int r = center.r + dr;
+            const TerrainSample* terrain = terrainAt(q, r);
+
+            if (terrain == nullptr) {
+                continue;
+            }
+
+            bool isWaterSurface =
+                terrain->height <= seaLevelLayer &&
+                terrain->water > visibleWaterThreshold;
+
+            if (!isWaterSurface) {
+                continue;
+            }
+
+            addPrism(
+                q,
+                r,
+                seaLevelLayer,
+                wrappedRotationStep(q, r, seaLevelLayer, settings.seed + 9091),
+                waterColorForTerrain(q, r, *terrain, settings),
+                waterAlpha
+            );
         }
     }
 }

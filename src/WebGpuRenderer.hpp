@@ -37,6 +37,7 @@ private:
     struct PrismInstanceData {
         glm::vec4 positionAndCos;
         glm::vec4 colorAndSin;
+        glm::vec4 alphaAndPadding;
     };
 
     SDL_Window* window_ = nullptr;

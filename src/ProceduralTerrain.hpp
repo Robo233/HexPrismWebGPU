@@ -8,11 +8,11 @@
 #include <vector>
 
 struct ProceduralTerrainSettings {
-    int seed = 2;
-    int renderRadius = 200;
+    int seed = 23443233;
+    int renderRadius = 250;
     int rebuildStride = 4;
     int minTerrainHeight = 1;
-    int maxTerrainHeight = 50;
+    int maxTerrainHeight = 256;
 };
 
 struct TerrainBuildResult {

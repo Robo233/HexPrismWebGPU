@@ -295,6 +295,7 @@ struct VertexIn {
     @location(1) normal : vec3f,
     @location(2) positionAndCos : vec4f,
     @location(3) colorAndSin : vec4f,
+    @location(4) alphaAndPadding : vec4f,
 };
 
 struct VertexOut {
@@ -450,23 +451,32 @@ fn vsMain(input : VertexIn) -> VertexOut {
         1.0
     );
     out.normal = rotatedNormal;
-    out.color = vec4f(input.colorAndSin.rgb, 1.0);
+    out.color = vec4f(input.colorAndSin.rgb, input.alphaAndPadding.x);
 
     return out;
 }
 
 @fragment
 fn fsMain(input : VertexOut) -> @location(0) vec4f {
-    let lightDir = normalize(vec3f(0.52, 0.66, -0.54));
     let n = normalize(input.normal);
+    let isWater = input.color.a < 0.999;
 
+    if (isWater) {
+        if (n.y < 0.75) {
+            discard;
+        }
+
+        return vec4f(input.color.rgb, input.color.a);
+    }
+
+    let lightDir = normalize(vec3f(0.52, 0.66, -0.54));
     let diffuse = max(dot(n, lightDir), 0.0);
     let ambient = 0.22;
 
     let lighting = ambient + diffuse * 0.78;
     let finalColor = input.color.rgb * lighting;
 
-    return vec4f(finalColor, 1.0);
+    return vec4f(finalColor, input.color.a);
 }
 )";
 
@@ -545,7 +555,7 @@ bool WebGpuRenderer::createPipeline() {
         static_cast<uint32_t>(vertexAttributes.size());
     vertexLayouts[0].attributes = vertexAttributes.data();
 
-    std::array<wgpu::VertexAttribute, 2> instanceAttributes{};
+    std::array<wgpu::VertexAttribute, 3> instanceAttributes{};
 
     instanceAttributes[0].shaderLocation = 2;
     instanceAttributes[0].offset =
@@ -557,14 +567,28 @@ bool WebGpuRenderer::createPipeline() {
         offsetof(PrismInstanceData, colorAndSin);
     instanceAttributes[1].format = wgpu::VertexFormat::Float32x4;
 
+    instanceAttributes[2].shaderLocation = 4;
+    instanceAttributes[2].offset =
+        offsetof(PrismInstanceData, alphaAndPadding);
+    instanceAttributes[2].format = wgpu::VertexFormat::Float32x4;
+
     vertexLayouts[1].arrayStride = sizeof(PrismInstanceData);
     vertexLayouts[1].stepMode = wgpu::VertexStepMode::Instance;
     vertexLayouts[1].attributeCount =
         static_cast<uint32_t>(instanceAttributes.size());
     vertexLayouts[1].attributes = instanceAttributes.data();
 
+    wgpu::BlendState alphaBlend{};
+    alphaBlend.color.operation = wgpu::BlendOperation::Add;
+    alphaBlend.color.srcFactor = wgpu::BlendFactor::SrcAlpha;
+    alphaBlend.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+    alphaBlend.alpha.operation = wgpu::BlendOperation::Add;
+    alphaBlend.alpha.srcFactor = wgpu::BlendFactor::One;
+    alphaBlend.alpha.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+
     wgpu::ColorTargetState colorTarget{};
     colorTarget.format = surfaceFormat_;
+    colorTarget.blend = &alphaBlend;
     colorTarget.writeMask = wgpu::ColorWriteMask::All;
 
     wgpu::FragmentState fragment{};
@@ -782,6 +806,12 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
             glm::vec4(
                 prisms[i].color,
                 rotationSin[static_cast<std::size_t>(step)]
+            ),
+            glm::vec4(
+                std::clamp(prisms[i].alpha, 0.0f, 1.0f),
+                0.0f,
+                0.0f,
+                0.0f
             )
         };
     }

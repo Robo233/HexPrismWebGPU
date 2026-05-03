@@ -70,7 +70,7 @@ void InputController::handleKeyboard(
 ) {
     const bool* keys = SDL_GetKeyboardState(nullptr);
 
-    float moveSpeed = 15.0f;
+    float moveSpeed = 50.0f;
     float rotateSpeed = 90.0f;
 
     if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) {
