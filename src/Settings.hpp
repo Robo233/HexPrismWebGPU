@@ -11,12 +11,8 @@ struct Color3 {
 namespace Terrain {
     constexpr int seed = 6564;
 
-    // Measured in hex cells from the current render center.
-    // renderRadius = 500 gives roughly 1001 hex cells across.
-    constexpr int renderRadius = 300;
+    constexpr int renderRadius = 500;
 
-    // How far the camera must move, in hex-cell coordinates, before terrain
-    // is rebuilt around the new center.
     constexpr int rebuildStride = 16;
     constexpr int minHeight = 1;
     constexpr int maxHeight = 256;
