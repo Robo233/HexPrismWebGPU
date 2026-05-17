@@ -1,5 +1,7 @@
 #include "WebGpuRenderer.hpp"
 
+#include "Settings.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -22,44 +24,6 @@
 #include <string>
 
 namespace {
-
-constexpr float Pi = 3.14159265359f;
-constexpr float TwoPi = Pi * 2.0f;
-
-float positiveFraction(float value) {
-    return value - std::floor(value);
-}
-
-float dayCyclePhaseForTime(float timeSeconds) {
-    return positiveFraction(
-        Settings::Time::dayNightStartPhase +
-            timeSeconds / Settings::Time::dayNightCycleSeconds
-    );
-}
-
-glm::vec3 sunDirectionForPhase(float phase) {
-    float angle = phase * TwoPi;
-
-    return glm::normalize(
-        glm::vec3(
-            std::cos(angle) * 0.78f,
-            std::sin(angle),
-            -0.54f
-        )
-    );
-}
-
-float daylightAmountForSunDirection(glm::vec3 sunDir) {
-    float t = std::clamp((sunDir.y + 0.06f) / 0.28f, 0.0f, 1.0f);
-
-    return t * t * (3.0f - 2.0f * t);
-}
-
-uint64_t shadowLightStepForTime(float timeSeconds) {
-    return static_cast<uint64_t>(
-        std::floor(timeSeconds / Settings::Shadow::lightUpdateSeconds)
-    );
-}
 
 std::string wgslFloat(float value) {
     std::ostringstream stream;
@@ -130,10 +94,6 @@ bool WebGpuRenderer::initialize() {
     }
 
     if (!createDepthTexture()) {
-        return false;
-    }
-
-    if (!createShadowDepthTexture()) {
         return false;
     }
 
@@ -332,34 +292,6 @@ bool WebGpuRenderer::createDepthTexture() {
 }
 
 
-bool WebGpuRenderer::createShadowDepthTexture() {
-    wgpu::TextureDescriptor desc{};
-    desc.size = { ShadowMapSize, ShadowMapSize, 1 };
-    desc.mipLevelCount = 1;
-    desc.sampleCount = 1;
-    desc.dimension = wgpu::TextureDimension::e2D;
-    desc.format = wgpu::TextureFormat::Depth24Plus;
-    desc.usage =
-        wgpu::TextureUsage::RenderAttachment |
-        wgpu::TextureUsage::TextureBinding;
-
-    shadowDepthTexture_ = device_.CreateTexture(&desc);
-
-    if (!shadowDepthTexture_) {
-        std::cerr << "Failed to create shadow depth texture.\n";
-        return false;
-    }
-
-    shadowDepthTextureView_ = shadowDepthTexture_.CreateView();
-
-    if (!shadowDepthTextureView_) {
-        std::cerr << "Failed to create shadow depth texture view.\n";
-        return false;
-    }
-
-    return true;
-}
-
 wgpu::Texture WebGpuRenderer::createDepthTextureObject(
     uint32_t width,
     uint32_t height
@@ -395,7 +327,6 @@ wgpu::ShaderModule WebGpuRenderer::createShaderModule() {
     std::string wgsl = R"(
 struct FrameUniforms {
     viewProjection : mat4x4f,
-    lightViewProjection : mat4x4f,
     cameraRightAndAspect : vec4f,
     cameraUpAndTanHalfFov : vec4f,
     cameraForwardAndTime : vec4f,
@@ -403,12 +334,6 @@ struct FrameUniforms {
 
 @group(0) @binding(0)
 var<uniform> frame : FrameUniforms;
-
-// Step 3O: optimized manual shadow-map depth reads.
-// The shadow map is cached and only regenerated when prism data changes.
-@group(0) @binding(1)
-var shadowMap : texture_depth_2d;
-
 
 struct VertexIn {
     @location(0) position : vec3f,
@@ -422,7 +347,6 @@ struct VertexOut {
     @builtin(position) position : vec4f,
     @location(0) normal : vec3f,
     @location(1) color : vec4f,
-    @location(2) worldPosition : vec3f,
 };
 
 struct SkyVertexOut {
@@ -736,159 +660,8 @@ fn vsMain(input : VertexIn) -> VertexOut {
     out.position = frame.viewProjection * vec4f(worldPosition, 1.0);
     out.normal = rotatedNormal;
     out.color = vec4f(input.colorAndSin.rgb, input.alpha);
-    out.worldPosition = worldPosition;
 
     return out;
-}
-
-@vertex
-fn vsShadow(input : VertexIn) -> VertexOut {
-    var out : VertexOut;
-
-    let uprightPosition = vec3f(
-        input.position.x,
-        input.position.z,
-        -input.position.y
-    );
-
-    let c = input.positionAndCos.w;
-    let s = input.colorAndSin.w;
-
-    let rotatedPosition = vec3f(
-        uprightPosition.x * c + uprightPosition.z * s,
-        uprightPosition.y,
-        -uprightPosition.x * s + uprightPosition.z * c
-    );
-
-    let worldPosition = rotatedPosition + input.positionAndCos.xyz;
-
-    out.position = frame.lightViewProjection * vec4f(worldPosition, 1.0);
-    out.normal = vec3f(0.0, 1.0, 0.0);
-    out.color = vec4f(1.0);
-    out.worldPosition = worldPosition;
-
-    return out;
-}
-
-
-fn compareShadowTexel(
-    texel : vec2i,
-    currentDepth : f32,
-    bias : f32
-) -> f32 {
-    let storedDepth = textureLoad(shadowMap, texel, 0);
-
-    if (currentDepth - bias > storedDepth) {
-        return 1.0;
-    }
-
-    return 0.0;
-}
-
-fn bilinearShadowCompare(
-    shadowUv : vec2f,
-    currentDepth : f32,
-    bias : f32
-) -> f32 {
-    let shadowMapSize = vec2f({{SHADOW_MAP_SIZE_FLOAT}}, {{SHADOW_MAP_SIZE_FLOAT}});
-    let texelPosition = clamp(
-        shadowUv * shadowMapSize - vec2f(0.5, 0.5),
-        vec2f(0.0, 0.0),
-        shadowMapSize - vec2f(2.0, 2.0)
-    );
-    let baseTexel = vec2i(floor(texelPosition));
-    let blend = fract(texelPosition);
-
-    let c00 = compareShadowTexel(
-        baseTexel,
-        currentDepth,
-        bias
-    );
-    let c10 = compareShadowTexel(
-        baseTexel + vec2i(1, 0),
-        currentDepth,
-        bias
-    );
-    let c01 = compareShadowTexel(
-        baseTexel + vec2i(0, 1),
-        currentDepth,
-        bias
-    );
-    let c11 = compareShadowTexel(
-        baseTexel + vec2i(1, 1),
-        currentDepth,
-        bias
-    );
-
-    let row0 = mix(c00, c10, blend.x);
-    let row1 = mix(c01, c11, blend.x);
-    return mix(row0, row1, blend.y);
-}
-
-fn manualShadowMapAmount(worldPosition : vec3f, normal : vec3f, lightDir : vec3f) -> f32 {
-    let lightClip = frame.lightViewProjection * vec4f(worldPosition, 1.0);
-
-    if (lightClip.w <= 0.0) {
-        return 0.0;
-    }
-
-    let lightNdc = lightClip.xyz / lightClip.w;
-
-    // WebGPU depth is already 0..1 because the C++ side uses
-    // GLM_FORCE_DEPTH_ZERO_TO_ONE. TextureLoad coordinates use texture
-    // coordinates, so Y is flipped here to match the depth texture rows.
-    let shadowUv = vec2f(
-        lightNdc.x * 0.5 + 0.5,
-        0.5 - lightNdc.y * 0.5
-    );
-    let currentDepth = lightNdc.z;
-
-    if (
-        shadowUv.x < 0.0 || shadowUv.x > 1.0 ||
-        shadowUv.y < 0.0 || shadowUv.y > 1.0 ||
-        currentDepth < 0.0 || currentDepth > 1.0
-    ) {
-        return 0.0;
-    }
-
-    // Major performance shortcut: only compute real shadowing on mostly
-    // upward-facing faces. Vertical prism sides are already darkened by
-    // diffuse lighting and do not need expensive shadow-map reads.
-    if (normal.y < 0.45) {
-        return 0.0;
-    }
-
-    // Step 3O: use one bilinear compare instead of the previous 9-filter
-    // pattern. This cuts fragment depth loads from roughly 36 to 4.
-    let slopeBias = (1.0 - saturate(dot(normal, lightDir))) * 0.0025;
-    let bias = 0.0012 + slopeBias;
-
-    let occlusion = bilinearShadowCompare(
-        shadowUv,
-        currentDepth,
-        bias
-    );
-
-    return occlusion * 0.58;
-}
-
-fn softShadowAmount(
-    worldPosition : vec3f,
-    normal : vec3f,
-    lightDir : vec3f
-) -> f32 {
-    let upwardFacing = smoothstep(0.45, 0.95, normal.y);
-    let projectedToGround =
-        worldPosition.xz - lightDir.xz * (worldPosition.y / max(lightDir.y, 0.18));
-
-    let broadShadow = fbm(projectedToGround * 0.42 + vec2f(19.3, -7.1));
-    let fineShadow = fbm(projectedToGround * 1.35 + vec2f(-4.7, 28.9));
-    let shadowMask = smoothstep(0.50, 0.78, broadShadow + fineShadow * 0.18);
-
-    let heightFade = 1.0 - smoothstep(16.0, 34.0, worldPosition.y);
-    let contactShade = (1.0 - upwardFacing) * 0.08;
-
-    return clamp(shadowMask * upwardFacing * heightFade * 0.65 + contactShade * 2.0, 0.0, 0.70);
 }
 
 @fragment
@@ -939,13 +712,8 @@ fn fsMain(input : VertexOut) -> @location(0) vec4f {
     let moonLight =
         moonLightColor(moonDir, day) * moonDiffuse * (0.36 + skyFacing * 0.28);
 
-    // Step 3O: cached real shadow map. The expensive part now only runs
-    // on upward-facing fragments inside manualShadowMapAmount.
-    let realShadow = manualShadowMapAmount(input.worldPosition, n, lightDir);
-    let shadow = clamp(realShadow * day, 0.0, 0.62);
-
     let finalColor =
-        input.color.rgb * (ambientLight + moonLight + directLight * (1.0 - shadow));
+        input.color.rgb * (ambientLight + moonLight + directLight);
 
     return vec4f(finalColor, input.color.a);
 }
@@ -960,11 +728,6 @@ fn fsMain(input : VertexOut) -> @location(0) vec4f {
         wgsl,
         "{{DAY_NIGHT_START_PHASE}}",
         wgslFloat(Settings::Time::dayNightStartPhase)
-    );
-    replaceAll(
-        wgsl,
-        "{{SHADOW_MAP_SIZE_FLOAT}}",
-        wgslFloat(static_cast<float>(Settings::Shadow::mapSize))
     );
     replaceAll(
         wgsl,
@@ -1115,40 +878,15 @@ bool WebGpuRenderer::createPipeline() {
     uniformBindEntry.buffer.type = wgpu::BufferBindingType::Uniform;
     uniformBindEntry.buffer.minBindingSize = sizeof(FrameUniforms);
 
-    wgpu::BindGroupLayoutEntry shadowTextureBindEntry{};
-    shadowTextureBindEntry.binding = 1;
-    shadowTextureBindEntry.visibility = wgpu::ShaderStage::Fragment;
-    shadowTextureBindEntry.texture.sampleType = wgpu::TextureSampleType::Depth;
-    shadowTextureBindEntry.texture.viewDimension = wgpu::TextureViewDimension::e2D;
-    shadowTextureBindEntry.texture.multisampled = false;
-
-    std::array<wgpu::BindGroupLayoutEntry, 2> mainBindEntries{
-        uniformBindEntry,
-        shadowTextureBindEntry
-    };
-
     wgpu::BindGroupLayoutDescriptor bindLayoutDesc{};
-    bindLayoutDesc.entryCount =
-        static_cast<uint32_t>(mainBindEntries.size());
-    bindLayoutDesc.entries = mainBindEntries.data();
+    bindLayoutDesc.entryCount = 1;
+    bindLayoutDesc.entries = &uniformBindEntry;
 
     frameBindGroupLayout_ =
         device_.CreateBindGroupLayout(&bindLayoutDesc);
 
     if (!frameBindGroupLayout_) {
         std::cerr << "Failed to create main frame bind group layout.\n";
-        return false;
-    }
-
-    wgpu::BindGroupLayoutDescriptor shadowBindLayoutDesc{};
-    shadowBindLayoutDesc.entryCount = 1;
-    shadowBindLayoutDesc.entries = &uniformBindEntry;
-
-    shadowFrameBindGroupLayout_ =
-        device_.CreateBindGroupLayout(&shadowBindLayoutDesc);
-
-    if (!shadowFrameBindGroupLayout_) {
-        std::cerr << "Failed to create shadow frame bind group layout.\n";
         return false;
     }
 
@@ -1173,39 +911,16 @@ bool WebGpuRenderer::createPipeline() {
     uniformBindGroupEntry.offset = 0;
     uniformBindGroupEntry.size = sizeof(FrameUniforms);
 
-    wgpu::BindGroupEntry shadowTextureBindGroupEntry{};
-    shadowTextureBindGroupEntry.binding = 1;
-    shadowTextureBindGroupEntry.textureView = shadowDepthTextureView_;
-
-    std::array<wgpu::BindGroupEntry, 2> mainBindGroupEntries{
-        uniformBindGroupEntry,
-        shadowTextureBindGroupEntry
-    };
-
     wgpu::BindGroupDescriptor frameBindDesc{};
     frameBindDesc.layout = frameBindGroupLayout_;
-    frameBindDesc.entryCount =
-        static_cast<uint32_t>(mainBindGroupEntries.size());
-    frameBindDesc.entries = mainBindGroupEntries.data();
+    frameBindDesc.entryCount = 1;
+    frameBindDesc.entries = &uniformBindGroupEntry;
 
     frameBindGroup_ =
         device_.CreateBindGroup(&frameBindDesc);
 
     if (!frameBindGroup_) {
         std::cerr << "Failed to create main frame bind group.\n";
-        return false;
-    }
-
-    wgpu::BindGroupDescriptor shadowFrameBindDesc{};
-    shadowFrameBindDesc.layout = shadowFrameBindGroupLayout_;
-    shadowFrameBindDesc.entryCount = 1;
-    shadowFrameBindDesc.entries = &uniformBindGroupEntry;
-
-    shadowFrameBindGroup_ =
-        device_.CreateBindGroup(&shadowFrameBindDesc);
-
-    if (!shadowFrameBindGroup_) {
-        std::cerr << "Failed to create shadow frame bind group.\n";
         return false;
     }
 
@@ -1218,18 +933,6 @@ bool WebGpuRenderer::createPipeline() {
 
     if (!pipelineLayout_) {
         std::cerr << "Failed to create main pipeline layout.\n";
-        return false;
-    }
-
-    wgpu::PipelineLayoutDescriptor shadowPipelineLayoutDesc{};
-    shadowPipelineLayoutDesc.bindGroupLayoutCount = 1;
-    shadowPipelineLayoutDesc.bindGroupLayouts = &shadowFrameBindGroupLayout_;
-
-    shadowPipelineLayout_ =
-        device_.CreatePipelineLayout(&shadowPipelineLayoutDesc);
-
-    if (!shadowPipelineLayout_) {
-        std::cerr << "Failed to create shadow pipeline layout.\n";
         return false;
     }
 
@@ -1347,30 +1050,6 @@ bool WebGpuRenderer::createPipeline() {
 
     if (!pipeline_) {
         std::cerr << "Failed to create render pipeline.\n";
-        return false;
-    }
-
-    wgpu::DepthStencilState shadowDepthStencil{};
-    shadowDepthStencil.format = wgpu::TextureFormat::Depth24Plus;
-    shadowDepthStencil.depthWriteEnabled = true;
-    shadowDepthStencil.depthCompare = wgpu::CompareFunction::Less;
-
-    wgpu::RenderPipelineDescriptor shadowPipelineDesc{};
-    shadowPipelineDesc.layout = shadowPipelineLayout_;
-    shadowPipelineDesc.vertex.module = shader;
-    shadowPipelineDesc.vertex.entryPoint = "vsShadow";
-    shadowPipelineDesc.vertex.bufferCount = 2;
-    shadowPipelineDesc.vertex.buffers = vertexLayouts;
-    shadowPipelineDesc.fragment = nullptr;
-    shadowPipelineDesc.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
-    shadowPipelineDesc.primitive.cullMode = wgpu::CullMode::None;
-    shadowPipelineDesc.depthStencil = &shadowDepthStencil;
-    shadowPipelineDesc.multisample.count = 1;
-
-    shadowPipeline_ = device_.CreateRenderPipeline(&shadowPipelineDesc);
-
-    if (!shadowPipeline_) {
-        std::cerr << "Failed to create shadow render pipeline.\n";
         return false;
     }
 
@@ -1559,11 +1238,6 @@ void WebGpuRenderer::render(
     glm::vec3 cameraRight = glm::normalize(glm::cross(forward, cameraUp));
     const float currentTimeSeconds =
         static_cast<float>(SDL_GetTicks()) * 0.001f;
-    const glm::vec3 sunDir =
-        sunDirectionForPhase(dayCyclePhaseForTime(currentTimeSeconds));
-    const float daylightAmount = daylightAmountForSunDirection(sunDir);
-    const uint64_t shadowLightStep =
-        shadowLightStepForTime(currentTimeSeconds);
 
     glm::mat4 view =
         glm::lookAt(
@@ -1589,122 +1263,8 @@ void WebGpuRenderer::render(
 
     proj[1][1] *= -1.0f;
 
-    const bool shadowMapNeedsUpdate =
-        daylightAmount > 0.01f &&
-        !prisms.empty() &&
-        (
-            !shadowMapValid_ ||
-            cachedShadowRevision_ != prismRevision ||
-            cachedShadowPrismCount_ != prisms.size() ||
-            cachedShadowLightStep_ != shadowLightStep
-        );
-
-    if (prisms.empty() || daylightAmount <= 0.01f) {
-        cachedLightViewProjection_ = glm::mat4(1.0f);
-        cachedShadowRevision_ = prisms.empty()
-            ? prismRevision
-            : cachedShadowRevision_;
-        cachedShadowPrismCount_ = prisms.empty()
-            ? 0
-            : cachedShadowPrismCount_;
-        shadowMapValid_ = false;
-    } else if (shadowMapNeedsUpdate) {
-        glm::vec3 shadowMin = prisms.front().position;
-        glm::vec3 shadowMax = prisms.front().position;
-
-        for (const Prism& prism : prisms) {
-            shadowMin = glm::min(shadowMin, prism.position);
-            shadowMax = glm::max(shadowMax, prism.position);
-        }
-
-        // Include prism geometry radius/height plus extra room for tree tops
-        // and for casters just outside the camera view. Keep this margin
-        // moderate so the 1024 shadow map has enough detail for tree shadows.
-        shadowMin -= glm::vec3(
-            Settings::Shadow::boundsHorizontalMargin,
-            Settings::Shadow::boundsBottomMargin,
-            Settings::Shadow::boundsHorizontalMargin
-        );
-        shadowMax += glm::vec3(
-            Settings::Shadow::boundsHorizontalMargin,
-            Settings::Shadow::boundsTopMargin,
-            Settings::Shadow::boundsHorizontalMargin
-        );
-
-        glm::vec3 shadowCenter = (shadowMin + shadowMax) * 0.5f;
-        shadowCenter.y = std::max(shadowCenter.y, 8.0f);
-
-        glm::vec3 lightUp(0.0f, 1.0f, 0.0f);
-        if (std::abs(glm::dot(lightUp, sunDir)) > 0.92f) {
-            lightUp = glm::vec3(0.0f, 0.0f, 1.0f);
-        }
-
-        const glm::vec3 lightForward = glm::normalize(-sunDir);
-        const glm::vec3 lightRight = glm::normalize(glm::cross(lightForward, lightUp));
-        const glm::vec3 lightTrueUp = glm::normalize(glm::cross(lightRight, lightForward));
-
-        float maxProjectedRadius = 48.0f;
-
-        const std::array<glm::vec3, 8> boundsCorners{
-            glm::vec3(shadowMin.x, shadowMin.y, shadowMin.z),
-            glm::vec3(shadowMin.x, shadowMin.y, shadowMax.z),
-            glm::vec3(shadowMin.x, shadowMax.y, shadowMin.z),
-            glm::vec3(shadowMin.x, shadowMax.y, shadowMax.z),
-            glm::vec3(shadowMax.x, shadowMin.y, shadowMin.z),
-            glm::vec3(shadowMax.x, shadowMin.y, shadowMax.z),
-            glm::vec3(shadowMax.x, shadowMax.y, shadowMin.z),
-            glm::vec3(shadowMax.x, shadowMax.y, shadowMax.z)
-        };
-
-        for (const glm::vec3& corner : boundsCorners) {
-            const glm::vec3 relative = corner - shadowCenter;
-            maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightRight)));
-            maxProjectedRadius = std::max(maxProjectedRadius, std::abs(glm::dot(relative, lightTrueUp)));
-        }
-
-        const float shadowHalfExtent =
-            std::clamp(
-                maxProjectedRadius + Settings::Shadow::halfExtentPadding,
-                Settings::Shadow::minHalfExtent,
-                Settings::Shadow::maxHalfExtent
-            );
-        const float shadowDistance = shadowHalfExtent * 2.0f;
-        const float shadowFarPlane = shadowHalfExtent * 4.0f;
-
-        const float shadowTexelWorldSize =
-            (shadowHalfExtent * 2.0f) / static_cast<float>(ShadowMapSize);
-
-        const float centerRight = glm::dot(shadowCenter, lightRight);
-        const float centerUp = glm::dot(shadowCenter, lightTrueUp);
-        const float snappedRight = std::floor(centerRight / shadowTexelWorldSize) * shadowTexelWorldSize;
-        const float snappedUp = std::floor(centerUp / shadowTexelWorldSize) * shadowTexelWorldSize;
-
-        shadowCenter +=
-            lightRight * (snappedRight - centerRight) +
-            lightTrueUp * (snappedUp - centerUp);
-
-        glm::mat4 lightView = glm::lookAt(
-            shadowCenter + sunDir * shadowDistance,
-            shadowCenter,
-            lightUp
-        );
-
-        glm::mat4 lightProjection = glm::ortho(
-            -shadowHalfExtent,
-            shadowHalfExtent,
-            -shadowHalfExtent,
-            shadowHalfExtent,
-            0.1f,
-            shadowFarPlane
-        );
-        lightProjection[1][1] *= -1.0f;
-
-        cachedLightViewProjection_ = lightProjection * lightView;
-    }
-
     FrameUniforms frameUniforms{};
     frameUniforms.viewProjection = proj * view;
-    frameUniforms.lightViewProjection = cachedLightViewProjection_;
     frameUniforms.cameraRightAndAspect =
         glm::vec4(cameraRight, aspect);
     frameUniforms.cameraUpAndTanHalfFov =
@@ -1726,17 +1286,6 @@ void WebGpuRenderer::render(
     );
 
     updatePrismInstanceBuffer(prisms, prismRevision);
-
-    std::size_t shadowCasterCount = prisms.size();
-
-    if (shadowMapNeedsUpdate) {
-        while (
-            shadowCasterCount > 0 &&
-            prisms[shadowCasterCount - 1].alpha < 0.999f
-        ) {
-            --shadowCasterCount;
-        }
-    }
 
     wgpu::SurfaceTexture surfaceTexture{};
     surface_.GetCurrentTexture(&surfaceTexture);
@@ -1763,38 +1312,6 @@ void WebGpuRenderer::render(
 
     wgpu::CommandEncoder encoder =
         device_.CreateCommandEncoder();
-
-    if (shadowMapNeedsUpdate && shadowCasterCount > 0) {
-        wgpu::RenderPassDepthStencilAttachment shadowDepthAttachment{};
-        shadowDepthAttachment.view = shadowDepthTextureView_;
-        shadowDepthAttachment.depthLoadOp = wgpu::LoadOp::Clear;
-        shadowDepthAttachment.depthStoreOp = wgpu::StoreOp::Store;
-        shadowDepthAttachment.depthClearValue = 1.0f;
-
-        wgpu::RenderPassDescriptor shadowPassDesc{};
-        shadowPassDesc.colorAttachmentCount = 0;
-        shadowPassDesc.colorAttachments = nullptr;
-        shadowPassDesc.depthStencilAttachment = &shadowDepthAttachment;
-
-        wgpu::RenderPassEncoder shadowPass =
-            encoder.BeginRenderPass(&shadowPassDesc);
-
-        shadowPass.SetPipeline(shadowPipeline_);
-        shadowPass.SetBindGroup(0, shadowFrameBindGroup_);
-        shadowPass.SetVertexBuffer(0, prismVertexBuffer_);
-        shadowPass.SetVertexBuffer(1, prismInstanceBuffer_);
-        shadowPass.SetIndexBuffer(prismIndexBuffer_, wgpu::IndexFormat::Uint16);
-        shadowPass.DrawIndexed(
-            static_cast<uint32_t>(prismMesh_.indices.size()),
-            static_cast<uint32_t>(shadowCasterCount)
-        );
-        shadowPass.End();
-
-        shadowMapValid_ = true;
-        cachedShadowRevision_ = prismRevision;
-        cachedShadowPrismCount_ = prisms.size();
-        cachedShadowLightStep_ = shadowLightStep;
-    }
 
     wgpu::RenderPassColorAttachment colorAttachment{};
     colorAttachment.view = backbuffer;

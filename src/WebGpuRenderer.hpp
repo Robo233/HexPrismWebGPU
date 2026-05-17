@@ -3,7 +3,6 @@
 #include "Camera.hpp"
 #include "HexPrismMesh.hpp"
 #include "Prism.hpp"
-#include "Settings.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -30,7 +29,6 @@ public:
 private:
     struct FrameUniforms {
         glm::mat4 viewProjection;
-        glm::mat4 lightViewProjection;
         glm::vec4 cameraRightAndAspect;
         glm::vec4 cameraUpAndTanHalfFov;
         glm::vec4 cameraForwardAndTime;
@@ -55,23 +53,12 @@ private:
 
     wgpu::Texture depthTexture_;
 
-    static constexpr uint32_t ShadowMapSize = Settings::Shadow::mapSize;
-    wgpu::Texture shadowDepthTexture_;
-    wgpu::TextureView shadowDepthTextureView_;
-
-    glm::mat4 cachedLightViewProjection_{1.0f};
-    uint64_t cachedShadowRevision_ = UINT64_MAX;
-    std::size_t cachedShadowPrismCount_ = static_cast<std::size_t>(-1);
-    uint64_t cachedShadowLightStep_ = UINT64_MAX;
-    bool shadowMapValid_ = false;
-
     MeshData prismMesh_;
     wgpu::Buffer prismVertexBuffer_;
     wgpu::Buffer prismIndexBuffer_;
 
     wgpu::Buffer frameUniformBuffer_;
     wgpu::BindGroup frameBindGroup_;
-    wgpu::BindGroup shadowFrameBindGroup_;
 
     wgpu::Buffer prismInstanceBuffer_;
     std::size_t prismInstanceCapacity_ = 0;
@@ -80,12 +67,9 @@ private:
     std::vector<PrismInstanceData> prismInstanceData_;
 
     wgpu::BindGroupLayout frameBindGroupLayout_;
-    wgpu::BindGroupLayout shadowFrameBindGroupLayout_;
     wgpu::PipelineLayout pipelineLayout_;
-    wgpu::PipelineLayout shadowPipelineLayout_;
     wgpu::RenderPipeline skyPipeline_;
     wgpu::RenderPipeline pipeline_;
-    wgpu::RenderPipeline shadowPipeline_;
 
     bool createInstance();
     bool createSurface();
@@ -93,7 +77,6 @@ private:
     bool requestDevice();
     bool configureSurface();
     bool createDepthTexture();
-    bool createShadowDepthTexture();
     bool createPrismBuffers();
     bool createPipeline();
 

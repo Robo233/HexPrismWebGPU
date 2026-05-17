@@ -1425,13 +1425,6 @@ void createProceduralPrisms(
                 glm::vec3(0.24f, 0.55f, 0.18f),
                 0.25f + random01(q, r, settings.seed + 4027) * 0.20f
             );
-        glm::vec3 leafShadow =
-            mixColor(
-                leafColor,
-                glm::vec3(0.02f, 0.11f, 0.04f),
-                0.22f
-            );
-
         for (int i = 0; i < trunkHeight; ++i) {
             addPrism(
                 q,
@@ -1465,20 +1458,20 @@ void createProceduralPrisms(
         addPrism(q, r, canopyBase, canopyRotation, leafColor);
 
         if (canopyRadius >= 1) {
-            addCanopyBlock(1, 0, canopyBase, canopyRotation + 2, leafShadow);
+            addCanopyBlock(1, 0, canopyBase, canopyRotation + 2, leafColor);
             addCanopyBlock(-1, 0, canopyBase, canopyRotation + 3, leafColor);
             addCanopyBlock(0, 1, canopyBase, canopyRotation + 4, leafColor);
-            addCanopyBlock(0, -1, canopyBase, canopyRotation + 5, leafShadow);
+            addCanopyBlock(0, -1, canopyBase, canopyRotation + 5, leafColor);
         }
 
         if (canopyRadius >= 2) {
             addCanopyBlock(1, -1, canopyBase, canopyRotation + 1, leafColor);
-            addCanopyBlock(-1, 1, canopyBase, canopyRotation + 2, leafShadow);
+            addCanopyBlock(-1, 1, canopyBase, canopyRotation + 2, leafColor);
             addCanopyBlock(1, 1, canopyBase, canopyRotation + 3, leafColor);
-            addCanopyBlock(-1, -1, canopyBase, canopyRotation + 4, leafShadow);
+            addCanopyBlock(-1, -1, canopyBase, canopyRotation + 4, leafColor);
 
             if (crownRoll > 0.64f) {
-                addCanopyBlock(2, 0, canopyBase, canopyRotation + 2, leafShadow);
+                addCanopyBlock(2, 0, canopyBase, canopyRotation + 2, leafColor);
             }
             if (crownRoll < 0.36f) {
                 addCanopyBlock(-2, 0, canopyBase, canopyRotation + 3, leafColor);
@@ -1487,7 +1480,7 @@ void createProceduralPrisms(
                 addCanopyBlock(0, 2, canopyBase, canopyRotation + 4, leafColor);
             }
             if (branchRoll < 0.34f) {
-                addCanopyBlock(0, -2, canopyBase, canopyRotation + 5, leafShadow);
+                addCanopyBlock(0, -2, canopyBase, canopyRotation + 5, leafColor);
             }
         }
 
@@ -1499,14 +1492,14 @@ void createProceduralPrisms(
                 addCanopyBlock(-1, 0, canopyBase + 1, canopyRotation + 3, leafColor);
 
                 if (canopyRadius >= 2 && branchRoll > 0.52f) {
-                    addCanopyBlock(1, -1, canopyBase + 1, canopyRotation + 4, leafShadow);
+                    addCanopyBlock(1, -1, canopyBase + 1, canopyRotation + 4, leafColor);
                 }
             } else {
                 addCanopyBlock(0, 1, canopyBase + 1, canopyRotation + 4, leafColor);
                 addCanopyBlock(0, -1, canopyBase + 1, canopyRotation + 5, leafColor);
 
                 if (canopyRadius >= 2 && branchRoll < 0.48f) {
-                    addCanopyBlock(-1, 1, canopyBase + 1, canopyRotation + 2, leafShadow);
+                    addCanopyBlock(-1, 1, canopyBase + 1, canopyRotation + 2, leafColor);
                 }
             }
         }
