@@ -528,6 +528,10 @@ fn starLayer(uv : vec2f, scale : f32, seed : f32) -> f32 {
 }
 
 fn starField(ray : vec3f, night : f32, moonAmount : f32, moonDisk : f32) -> vec3f {
+    if (night <= 0.001) {
+        return vec3f(0.0);
+    }
+
     let domeFade = smoothstep(-0.02, 0.18, ray.y);
     let moonFade = 1.0 - smoothstep(0.90, 0.998, moonAmount) * 0.42;
     let projection = ray.xz / max(ray.y + 0.38, 0.20);
@@ -680,9 +684,9 @@ fn fsMain(input : VertexOut) -> @location(0) vec4f {
         }
 
         let waterSunGlow =
-            smoothstep(0.25, 0.95, dot(normalize(frame.cameraForwardAndTime.xyz), lightDir));
+            smoothstep(0.25, 0.95, dot(frame.cameraForwardAndTime.xyz, lightDir));
         let waterMoonGlow =
-            smoothstep(0.55, 0.95, dot(normalize(frame.cameraForwardAndTime.xyz), moonDir)) *
+            smoothstep(0.55, 0.95, dot(frame.cameraForwardAndTime.xyz, moonDir)) *
             moonStrength;
         let waterSkyTint =
             mix({{WATER_NIGHT_TINT}}, {{WATER_DAY_TINT}}, day);
@@ -986,16 +990,20 @@ bool WebGpuRenderer::createPipeline() {
     alphaBlend.alpha.srcFactor = wgpu::BlendFactor::One;
     alphaBlend.alpha.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
 
-    wgpu::ColorTargetState colorTarget{};
-    colorTarget.format = surfaceFormat_;
-    colorTarget.blend = &alphaBlend;
-    colorTarget.writeMask = wgpu::ColorWriteMask::All;
+    wgpu::ColorTargetState opaqueColorTarget{};
+    opaqueColorTarget.format = surfaceFormat_;
+    opaqueColorTarget.writeMask = wgpu::ColorWriteMask::All;
+
+    wgpu::ColorTargetState transparentColorTarget{};
+    transparentColorTarget.format = surfaceFormat_;
+    transparentColorTarget.blend = &alphaBlend;
+    transparentColorTarget.writeMask = wgpu::ColorWriteMask::All;
 
     wgpu::FragmentState fragment{};
     fragment.module = shader;
     fragment.entryPoint = "fsMain";
     fragment.targetCount = 1;
-    fragment.targets = &colorTarget;
+    fragment.targets = &opaqueColorTarget;
 
     wgpu::DepthStencilState depthStencil{};
     depthStencil.format = wgpu::TextureFormat::Depth24Plus;
@@ -1007,11 +1015,22 @@ bool WebGpuRenderer::createPipeline() {
     skyDepthStencil.depthWriteEnabled = false;
     skyDepthStencil.depthCompare = wgpu::CompareFunction::Always;
 
+    wgpu::DepthStencilState transparentDepthStencil{};
+    transparentDepthStencil.format = wgpu::TextureFormat::Depth24Plus;
+    transparentDepthStencil.depthWriteEnabled = false;
+    transparentDepthStencil.depthCompare = wgpu::CompareFunction::Less;
+
     wgpu::FragmentState skyFragment{};
     skyFragment.module = shader;
     skyFragment.entryPoint = "fsSky";
     skyFragment.targetCount = 1;
-    skyFragment.targets = &colorTarget;
+    skyFragment.targets = &opaqueColorTarget;
+
+    wgpu::FragmentState transparentFragment{};
+    transparentFragment.module = shader;
+    transparentFragment.entryPoint = "fsMain";
+    transparentFragment.targetCount = 1;
+    transparentFragment.targets = &transparentColorTarget;
 
     wgpu::RenderPipelineDescriptor skyPipelineDesc{};
     skyPipelineDesc.layout = pipelineLayout_;
@@ -1050,6 +1069,18 @@ bool WebGpuRenderer::createPipeline() {
 
     if (!pipeline_) {
         std::cerr << "Failed to create render pipeline.\n";
+        return false;
+    }
+
+    wgpu::RenderPipelineDescriptor transparentPipelineDesc = pipelineDesc;
+    transparentPipelineDesc.fragment = &transparentFragment;
+    transparentPipelineDesc.depthStencil = &transparentDepthStencil;
+
+    transparentPipeline_ =
+        device_.CreateRenderPipeline(&transparentPipelineDesc);
+
+    if (!transparentPipeline_) {
+        std::cerr << "Failed to create transparent render pipeline.\n";
         return false;
     }
 
@@ -1159,6 +1190,7 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
     if (prisms.empty()) {
         uploadedPrismRevision_ = prismRevision;
         uploadedPrismCount_ = 0;
+        uploadedOpaquePrismCount_ = 0;
         return;
     }
 
@@ -1191,24 +1223,51 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
         -0.8660254038f
     };
 
-    for (std::size_t i = 0; i < prisms.size(); ++i) {
-        int step = prisms[i].rotationStep % 6;
+    std::size_t opaqueCount = 0;
+
+    for (const Prism& prism : prisms) {
+        if (prism.alpha >= 0.999f) {
+            ++opaqueCount;
+        }
+    }
+
+    std::size_t opaqueIndex = 0;
+    std::size_t transparentIndex = opaqueCount;
+
+    auto writePrismInstance = [&](
+        std::size_t index,
+        const Prism& prism,
+        float alpha
+    ) {
+        int step = prism.rotationStep % 6;
 
         if (step < 0) {
             step += 6;
         }
 
-        prismInstanceData_[i] = PrismInstanceData{
+        prismInstanceData_[index] = PrismInstanceData{
             glm::vec4(
-                prisms[i].position,
+                prism.position,
                 rotationCos[static_cast<std::size_t>(step)]
             ),
             glm::vec4(
-                prisms[i].color,
+                prism.color,
                 rotationSin[static_cast<std::size_t>(step)]
             ),
-            std::clamp(prisms[i].alpha, 0.0f, 1.0f)
+            alpha
         };
+    };
+
+    for (const Prism& prism : prisms) {
+        float alpha = std::clamp(prism.alpha, 0.0f, 1.0f);
+
+        if (alpha >= 0.999f) {
+            writePrismInstance(opaqueIndex, prism, alpha);
+            ++opaqueIndex;
+        } else {
+            writePrismInstance(transparentIndex, prism, alpha);
+            ++transparentIndex;
+        }
     }
 
     queue_.WriteBuffer(
@@ -1220,6 +1279,7 @@ void WebGpuRenderer::updatePrismInstanceBuffer(
 
     uploadedPrismRevision_ = prismRevision;
     uploadedPrismCount_ = prisms.size();
+    uploadedOpaquePrismCount_ = opaqueCount;
 }
 
 void WebGpuRenderer::render(
@@ -1237,7 +1297,11 @@ void WebGpuRenderer::render(
     glm::vec3 cameraUp = getCameraUp(camera);
     glm::vec3 cameraRight = glm::normalize(glm::cross(forward, cameraUp));
     const float currentTimeSeconds =
-        static_cast<float>(SDL_GetTicks()) * 0.001f;
+        Settings::Time::freezeTime
+            ? Settings::Time::frozenTimeSeconds
+            : static_cast<float>(SDL_GetTicks()) *
+                0.001f *
+                Settings::Time::timeScale;
 
     glm::mat4 view =
         glm::lookAt(
@@ -1343,17 +1407,36 @@ void WebGpuRenderer::render(
     pass.SetBindGroup(0, frameBindGroup_);
     pass.Draw(3);
 
-    pass.SetPipeline(pipeline_);
     pass.SetBindGroup(0, frameBindGroup_);
     pass.SetVertexBuffer(0, prismVertexBuffer_);
     pass.SetIndexBuffer(prismIndexBuffer_, wgpu::IndexFormat::Uint16);
 
     if (!prisms.empty()) {
+        std::size_t opaqueCount =
+            std::min(uploadedOpaquePrismCount_, uploadedPrismCount_);
+        std::size_t transparentCount =
+            uploadedPrismCount_ - opaqueCount;
+
         pass.SetVertexBuffer(1, prismInstanceBuffer_);
-        pass.DrawIndexed(
-            static_cast<uint32_t>(prismMesh_.indices.size()),
-            static_cast<uint32_t>(prisms.size())
-        );
+
+        if (opaqueCount > 0) {
+            pass.SetPipeline(pipeline_);
+            pass.DrawIndexed(
+                static_cast<uint32_t>(prismMesh_.indices.size()),
+                static_cast<uint32_t>(opaqueCount)
+            );
+        }
+
+        if (transparentCount > 0) {
+            pass.SetPipeline(transparentPipeline_);
+            pass.DrawIndexed(
+                static_cast<uint32_t>(prismMesh_.indices.size()),
+                static_cast<uint32_t>(transparentCount),
+                0,
+                0,
+                static_cast<uint32_t>(opaqueCount)
+            );
+        }
     }
 
     pass.End();

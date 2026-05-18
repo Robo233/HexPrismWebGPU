@@ -22,14 +22,17 @@ namespace Camera {
     constexpr float verticalFovDegrees = 45.0f;
     constexpr float nearClipDistance = 0.1f;
 
-    // Measured in world units, not hex cells. This only controls clipping of
-    // already-generated terrain; it does not load terrain by itself.
-    constexpr float farClipDistance = 100.0f;
+    constexpr float farClipDistance = 350.0f;
 }
 
 namespace Time {
     constexpr float dayNightCycleSeconds = 180.0f;
-    constexpr float dayNightStartPhase = 2.0f;
+    // 0.5 = night
+    // 0.8 = morning
+    constexpr float dayNightStartPhase = 0.82;
+    constexpr bool freezeTime = true;
+    constexpr float frozenTimeSeconds = dayNightCycleSeconds * 0.25f;
+    constexpr float timeScale = 1.0f;
 }
 
 namespace Lighting {

@@ -64,12 +64,14 @@ private:
     std::size_t prismInstanceCapacity_ = 0;
     uint64_t uploadedPrismRevision_ = 0;
     std::size_t uploadedPrismCount_ = 0;
+    std::size_t uploadedOpaquePrismCount_ = 0;
     std::vector<PrismInstanceData> prismInstanceData_;
 
     wgpu::BindGroupLayout frameBindGroupLayout_;
     wgpu::PipelineLayout pipelineLayout_;
     wgpu::RenderPipeline skyPipeline_;
     wgpu::RenderPipeline pipeline_;
+    wgpu::RenderPipeline transparentPipeline_;
 
     bool createInstance();
     bool createSurface();

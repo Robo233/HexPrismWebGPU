@@ -189,6 +189,32 @@ std::size_t hexCellCountForRadius(int radius) {
         static_cast<std::size_t>(3 * radius * (radius + 1));
 }
 
+int effectiveRenderRadiusForSettings(
+    const ProceduralTerrainSettings& settings
+) {
+    HexGridMetrics metrics{};
+    float shortestCellStep =
+        std::max(
+            0.001f,
+            std::min(
+                metrics.horizontalSpacing(),
+                metrics.diagonalSpacing()
+            )
+        );
+    int farClipCellRadius =
+        static_cast<int>(
+            std::ceil(
+                Settings::Camera::farClipDistance / shortestCellStep
+            )
+        );
+    int movementMargin =
+        std::max(settings.rebuildStride * 2, 12);
+    int clippedRadius =
+        std::max(1, farClipCellRadius + movementMargin);
+
+    return std::clamp(settings.renderRadius, 1, clippedRadius);
+}
+
 const std::vector<HexOffset>& hexOffsetsWithinRadius(int radius) {
     static std::unordered_map<int, std::vector<HexOffset>> offsetsByRadius;
 
@@ -954,7 +980,7 @@ void createProceduralPrisms(
 ) {
     prisms.clear();
 
-    int renderRadius = settings.renderRadius;
+    int renderRadius = effectiveRenderRadiusForSettings(settings);
     int diameter = renderRadius * 2 + 1;
     std::vector<TerrainSample> terrainSamples(
         static_cast<std::size_t>(diameter * diameter),
@@ -1024,8 +1050,8 @@ void createProceduralPrisms(
 
     std::size_t estimatedPrismCount =
         visibleTerrainCellCount *
-        static_cast<std::size_t>(std::min(settings.maxTerrainHeight, 18)) +
-        visibleTerrainCellCount * 5u;
+        static_cast<std::size_t>(std::min(settings.maxTerrainHeight, 8)) +
+        visibleTerrainCellCount * 3u;
 
     if (prisms.capacity() < estimatedPrismCount) {
         prisms.reserve(estimatedPrismCount);
@@ -1042,7 +1068,7 @@ void createProceduralPrisms(
     }
 
     std::vector<HexOffset> missingTerrainOffsets;
-    missingTerrainOffsets.reserve(visibleTerrainCellCount / 8u);
+    missingTerrainOffsets.reserve(visibleTerrainCellCount);
 
     for (const HexOffset& offset : visibleOffsets) {
         int q = center.q + offset.dq;
@@ -1098,16 +1124,13 @@ void createProceduralPrisms(
 
     int seaLevelLayer = seaLevelLayerForSettings(settings);
 
-    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
-        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
-            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
-                continue;
-            }
-
-            int q = center.q + dq;
-            int r = center.r + dr;
-            TerrainSample& terrain =
-                terrainSamples[terrainIndex(dq, dr)];
+    for (const HexOffset& offset : visibleOffsets) {
+        int dq = offset.dq;
+        int dr = offset.dr;
+        int q = center.q + dq;
+        int r = center.r + dr;
+        TerrainSample& terrain =
+            terrainSamples[terrainIndex(dq, dr)];
 
             float strongestAdjacentSea = terrain.sea;
             float strongestAdjacentInlandWater =
@@ -1253,23 +1276,21 @@ void createProceduralPrisms(
             } else if (immediateCoast && connectedToWater) {
                 terrain.sand = std::max(terrain.sand, 1.0f);
             }
-        }
     }
 
     constexpr int maxBeachDistanceFromWater = 2;
     constexpr int maxBeachHeightAboveSeaLevel = 3;
     constexpr float visibleWaterThreshold = 0.05f;
+    const std::vector<HexOffset>& beachOffsets =
+        hexOffsetsWithinRadius(maxBeachDistanceFromWater);
 
-    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
-        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
-            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
-                continue;
-            }
-
-            int q = center.q + dq;
-            int r = center.r + dr;
-            TerrainSample& terrain =
-                terrainSamples[terrainIndex(dq, dr)];
+    for (const HexOffset& offset : visibleOffsets) {
+        int dq = offset.dq;
+        int dr = offset.dr;
+        int q = center.q + dq;
+        int r = center.r + dr;
+        TerrainSample& terrain =
+            terrainSamples[terrainIndex(dq, dr)];
 
             bool isWaterCell =
                 terrain.height <= seaLevelLayer &&
@@ -1283,38 +1304,21 @@ void createProceduralPrisms(
 
             bool closeToWater = false;
 
-            for (
-                int nearDq = -maxBeachDistanceFromWater;
-                nearDq <= maxBeachDistanceFromWater && !closeToWater;
-                ++nearDq
-            ) {
-                for (
-                    int nearDr = -maxBeachDistanceFromWater;
-                    nearDr <= maxBeachDistanceFromWater;
-                    ++nearDr
-                ) {
-                    if (
-                        hexDistanceFromOrigin(nearDq, nearDr) >
-                        maxBeachDistanceFromWater
-                    ) {
-                        continue;
-                    }
+            for (const HexOffset& nearOffset : beachOffsets) {
+                const TerrainSample* nearbyTerrain =
+                    terrainAt(q + nearOffset.dq, r + nearOffset.dr);
 
-                    const TerrainSample* nearbyTerrain =
-                        terrainAt(q + nearDq, r + nearDr);
+                if (nearbyTerrain == nullptr) {
+                    continue;
+                }
 
-                    if (nearbyTerrain == nullptr) {
-                        continue;
-                    }
+                bool nearbyWaterCell =
+                    nearbyTerrain->height <= seaLevelLayer &&
+                    nearbyTerrain->water > visibleWaterThreshold;
 
-                    bool nearbyWaterCell =
-                        nearbyTerrain->height <= seaLevelLayer &&
-                        nearbyTerrain->water > visibleWaterThreshold;
-
-                    if (nearbyWaterCell) {
-                        closeToWater = true;
-                        break;
-                    }
+                if (nearbyWaterCell) {
+                    closeToWater = true;
+                    break;
                 }
             }
 
@@ -1333,7 +1337,6 @@ void createProceduralPrisms(
                     std::clamp(fade, 0.0f, 1.0f)
                 );
             }
-        }
     }
 
     HexGridMetrics metrics{};
@@ -1571,16 +1574,11 @@ void createProceduralPrisms(
         return true;
     };
 
-    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
-        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
-            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
-                continue;
-            }
-
-            int q = center.q + dq;
-            int r = center.r + dr;
-            const TerrainSample* terrain = terrainAt(q, r);
-            int terrainHeight = terrain == nullptr ? 0 : terrain->height;
+    for (const HexOffset& offset : visibleOffsets) {
+        int q = center.q + offset.dq;
+        int r = center.r + offset.dr;
+        const TerrainSample* terrain = terrainAt(q, r);
+        int terrainHeight = terrain == nullptr ? 0 : terrain->height;
 
             if (terrainHeight == 0) {
                 continue;
@@ -1612,23 +1610,15 @@ void createProceduralPrisms(
                 );
             };
 
-            if (terrainHeight == 1) {
-                addTerrainLayer(0);
-            } else {
-                addTerrainLayer(0);
+            int firstExposedLayer =
+                std::clamp(minNeighborHeight, 0, terrainHeight - 1);
 
-                int firstExposedMiddleLayer =
-                    std::max(1, minNeighborHeight);
-
-                for (
-                    int layer = firstExposedMiddleLayer;
-                    layer < terrainHeight - 1;
-                    ++layer
-                ) {
-                    addTerrainLayer(layer);
-                }
-
-                addTerrainLayer(terrainHeight - 1);
+            for (
+                int layer = firstExposedLayer;
+                layer < terrainHeight;
+                ++layer
+            ) {
+                addTerrainLayer(layer);
             }
 
             if (shouldPlaceTree(q, r, *terrain, settings)) {
@@ -1643,20 +1633,14 @@ void createProceduralPrisms(
                     addTree(q, r, terrainHeight - 1);
                 }
             }
-        }
     }
 
     constexpr float waterAlpha = 0.58f;
 
-    for (int dq = -renderRadius; dq <= renderRadius; ++dq) {
-        for (int dr = -renderRadius; dr <= renderRadius; ++dr) {
-            if (hexDistanceFromOrigin(dq, dr) > renderRadius) {
-                continue;
-            }
-
-            int q = center.q + dq;
-            int r = center.r + dr;
-            const TerrainSample* terrain = terrainAt(q, r);
+    for (const HexOffset& offset : visibleOffsets) {
+        int q = center.q + offset.dq;
+        int r = center.r + offset.dr;
+        const TerrainSample* terrain = terrainAt(q, r);
 
             if (terrain == nullptr) {
                 continue;
@@ -1678,7 +1662,6 @@ void createProceduralPrisms(
                 waterColorForTerrain(q, r, *terrain, settings),
                 waterAlpha
             );
-        }
     }
 }
 
